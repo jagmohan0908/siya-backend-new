@@ -1,0 +1,225 @@
+# Siya mobile API — staged ERP migration
+
+This service mediates Flutter → ERPNext. ERP remains the business database; the
+service has no separate patient database. Shopify continues to own catalog,
+checkout, login-token verification, and issued discount codes. ERP File records
+own S3 attachment metadata. n8n remains responsible for appointment automation.
+
+**This is a staged implementation, not a completed production cutover.** Builds
+without `MOBILE_API_BASE_URL` retain the existing integrations. Configured builds
+use the new API and never silently fall back to Shopify/Supabase for ERP records.
+The reference `mobile_app` ERP source has not been modified.
+
+## Repository layout
+
+This standalone repository was extracted from `mobile_backend/` in
+`jagmohan0908/siyaayurveda_app` at commit `99004f18837f7c02c3998dcb34e0f522bd6289ed`.
+The Flutter app remains in that separate repository. Backend deployment changes
+belong in this repository; changes here do not automatically update the old copy.
+
+## Render development deployment
+
+Connect `jagmohan0908/siya-backend-new` as a new Render Web Service, or use its
+`render.yaml` with New > Blueprint. Use a separate development service so the
+existing backend keeps running. The supplied Blueprint uses the free plan for
+development and manual deployments.
+
+For a manually created Web Service:
+
+| Setting | Value |
+| --- | --- |
+| Branch | `main` |
+| Root directory | Leave blank (backend is at the repository root) |
+| Runtime | Node |
+| Build command | `npm test` |
+| Start command | `npm start` |
+| Health check path | `/health` |
+
+Set `NODE_VERSION=22`, `HOST=0.0.0.0`, `BOOKINGS_ENABLED=false`,
+`ERP_URL=https://dev-sr.butest.tech`, plus `ERP_TOKEN`, `SHOPIFY_DOMAIN`, and
+`SHOPIFY_STOREFRONT_TOKEN` in Render's Environment settings. `ERP_TOKEN` is
+`api_key:api_secret` without a `token ` prefix. The Shopify domain must be the
+`your-store.myshopify.com` hostname. Let Render supply `PORT`.
+
+The real local `.env` is not included in this repository. Transfer its settings
+directly into Render, not into tracked files. Add optional webhook, Razorpay test,
+Shopify Admin, and browser CORS settings from `.env.example` when those features
+are ready for testing. Keep booking writes disabled until the release
+prerequisites below are resolved. `/health` only checks that the process is up.
+
+After deployment, verify `/health` and `/v1/doctors`, then test authenticated flows
+with a reviewed test patient. Use the resulting HTTPS URL as the Flutter build's
+`MOBILE_API_BASE_URL` in the app repository. No Render database is required: ERP
+remains the database. This deployment does not complete production migration.
+
+References: [Render Web Services](https://render.com/docs/web-services),
+[Blueprint configuration](https://render.com/docs/blueprint-spec).
+
+## Running locally
+
+Requires Node 22.13+; no npm runtime dependencies. Copy `.env.example` to `.env`
+and configure server secrets locally. `.env` is ignored by Git and Docker.
+
+```powershell
+cd siya-backend-new
+npm run setup:erp
+npm start
+```
+
+`setup:erp` adds one custom DocType, **Siya Mobile Record**, restricted to System
+Manager. It never changes existing ERP DocTypes or app source. Before production,
+use a dedicated integration user with only the required ERP permissions.
+
+Run behind TLS, with one service process during the staged rollout. Restrict web
+origins with `CORS_ORIGINS`. Use the native app's Shopify customer access token as
+`Authorization: Bearer …`; the backend verifies it with Shopify. Do not use a
+phone number, Supabase email-exchange token, or the literal `shiprocket_session`
+as authentication. Customer Account API tokens need a separate verified adapter
+before that login mode can use this backend.
+
+```powershell
+flutter run --dart-define=MOBILE_API_BASE_URL=http://10.0.2.2:8787
+```
+
+The local HTTP exception is restricted to localhost and the Android emulator.
+Use HTTPS for a remotely hosted backend. Never include ERP, Razorpay secret, or
+Shopify Admin credentials in Dart defines or the APK.
+
+## Implemented routes
+
+| Route | Behavior |
+| --- | --- |
+| `GET /health` | Process health; not a claim that all integrations are ready |
+| `GET /v1/doctors` | ERP doctors and schedule days, filtered by `doctor-policy.json`; Megha fee remains 0 |
+| `GET /v1/doctors/:id/slots?date=YYYY-MM-DD` | ERP capacity plus conservative filtering of existing Clinic Appointments |
+| `GET /v1/review-avatars` | Signed URLs for the fixed, public Indian illustration asset records |
+| `GET /v1/profile`, `PUT /v1/profile` | Customer-scoped profile with optimistic revision checks |
+| `POST /v1/appointment-orders` | Reserve a slot, persist the booking, create a server-priced Razorpay order |
+| `POST /v1/appointments`, `GET /v1/appointments` | Create/reconcile bookings and retrieve current ERP status/Meet link |
+| `POST /v1/appointments/:id/requests` | Store cancellation/reschedule requests for clinic review; does not claim the schedule already changed |
+| `GET /v1/diets` | Diet charts assigned through the linked patient's encounters |
+| `POST /v1/treatments`, `GET /v1/treatments` | Versioned questionnaire, answers, result text and attachment references |
+| `GET /v1/habits`, `PUT /v1/habits` | ERP tracker persistence; today's entries, server-calculated streak, revision conflicts |
+| `POST /v1/files`, `GET /v1/files/:id` | Private image upload through ERP File→S3; ownership checked before signing |
+| `GET /v1/orders?cursor=0` | Submitted Sales Invoices/credit notes and explicitly authorized unbilled Sales Orders |
+| `GET /v1/invoices/:id`, `GET /v1/invoices/:id/pdf` | Ownership-checked invoice details and PDF |
+
+Normal versioned writes use `{ "data": {…}, "revision": 0 }`. A stale save returns
+409 and must be refreshed, not silently overwritten. The ERP `modified` timestamp
+is also supplied on updates for Frappe's server-side concurrency check.
+
+## Identity and historical patient linking
+
+A verified Shopify customer ID maps to an ERP Mobile App User. An existing single
+Patient link on that user's profiles can be reused. **Phone/email matching alone
+does not grant access to clinical history or invoices.** Unlinked accounts can
+save app records but receive `patient_link_required` for clinical/billing history.
+
+The operator-only `scripts/link-patient.mjs` validates a reviewed mapping. Set
+`SHOPIFY_CUSTOMER_ID` to the full customer GID and `ERP_PATIENT_ID` to the ERP
+patient. It defaults to dry run. Set `APPLY_LINK=1` to save. Setting
+`AUTHORIZE_CUSTOMER_INVOICES=1` additionally authorizes that patient's Customer
+account, including invoices without a Patient field and unbilled Sales Orders.
+Do this only when ownership of that entire Customer account is established.
+Run mapping/migration operations during a maintenance window.
+
+No bulk phone-based migration has been performed. Existing Hive, Sheets and
+Supabase records remain in place. Their reviewed ownership mapping and import
+are prerequisites to a production cutover. Family profiles with multiple Patients
+need an explicit profile selector/mapping before exposing their historical data.
+
+## Booking and automation contract
+
+`id` is a stable UUID reused across payment preparation, payment completion and
+retries. ERP reservations are deterministic per account/UUID. Paid appointments
+require Razorpay order ownership, amount, INR currency, captured status, and no
+refund. The service records webhook intent before POST and never blindly repeats
+an uncertain delivery. It reconciles the encounter by the unique external ID in
+`sr_notes` when the app retrieves appointments.
+
+Configure a **dev-only** `APPOINTMENT_WEBHOOK_URL` for testing. The current app's
+`appointment_eternity` URL was deliberately not copied into the local dev env
+because its target ERP/environment has not been confirmed. An optional
+`APPOINTMENT_WEBHOOK_SECRET` is sent as `X-Mobile-Webhook-Secret`.
+Appointment writes also require `BOOKINGS_ENABLED=true`; leave it false until
+the deployment checks below pass. This prevents accidentally enabling bookings
+by merely configuring an API URL or webhook.
+
+The webhook receives the booking ID, stable ERP doctor ID, reservation reference,
+patient/contact information, fee, payment reference/status and consultation mode.
+It must return the saved Patient Encounter (single object or one-item array),
+retain `External appointment ID: <id>` in `sr_notes`, and persist the video Meet
+link in ERP's `google_meet_link`. The backend rereads that encounter before it
+marks the booking verified. Pending, Approved, Checked In and Cancelled are
+distinct states. The app's pending message remains “Our team will contact you
+soon for confirmation.”
+
+Before enabling live appointment writes, finish these deployment checks:
+
+- All ERP booking channels must share capacity validation/locking. The current
+  ERP Mobile App Appointment hook locks mobile reservations; the additional
+  Clinic Appointment read here is **not atomic with simultaneous staff bookings**.
+  A shared ERP transaction/validation hook is still needed for all channels.
+- Configure abandoned-payment hold expiry and recovery of payment-order timeouts.
+  This staging service retains uncertain reservations for reconciliation instead
+  of releasing a potentially paid appointment or charging again.
+- Confirm the n8n workflow uses stable ERP doctor IDs, preserves reservation links,
+  creates a video link once, and can reconcile a response lost after commit.
+- Have the clinic process `appointment_request` records. Cancellation/rescheduling
+  currently creates a request, not an automatic clinical workflow transition.
+
+## Habit rewards
+
+The backend ignores client-supplied reward codes and streak counts. A clinic-owned
+`habit_plan` record for the account must contain the approved `habitIds` before
+automatic reward issuance. `SHOPIFY_ADMIN_TOKEN` needs discount read/write scopes.
+After 30 days the backend creates a deterministic, customer-restricted 5% code,
+one use, valid 90 days. It looks up the code before retrying Shopify creation.
+Progress is saved before contacting Shopify so a provider failure cannot erase it.
+
+Daily streaks follow the app's kit frequencies and exclude weekly products.
+Legacy streak/reward migration, clinical plan
+assignment, redemption-status synchronization and offline event merging require
+validation before enabling rewards for existing users. The app does not invent
+new local discount codes when using this backend.
+
+## Files and images
+
+The ERP S3 pipeline must be configured and healthy. Private app uploads are linked
+to the verified Mobile App User; clients cannot provide an arbitrary ERP owner.
+The API checks image magic bytes and rejects uploads that did not reach S3.
+Only stable File IDs are stored; download links expire.
+
+`scripts/publish-review-assets.mjs` publishes the two generated illustrations and
+stores their File IDs in a fixed ERP record. It checks for an existing upload
+before retrying. The app has bundled JPEG fallbacks. The existing example review
+content is labelled **Sample review**, never presented as a verified testimonial.
+Production testimonials should use consented reviewer images and approved text.
+
+## Tests and rollout
+
+```powershell
+npm test
+npm run check:dev
+# Synthetic record CRUD/concurrency test; restricted to dev-sr.butest.tech:
+$env:DEV_TEST_WRITES='1'
+npm run check:dev
+```
+
+From the app root:
+
+```powershell
+flutter test --no-pub
+flutter build apk --debug --no-pub --dart-define=MOBILE_API_BASE_URL=http://10.0.2.2:8787
+```
+
+See `TESTING.md` for observed results and live checks still blocked. Do not enable
+the production Dart define until account mapping, data migration, cross-channel
+booking concurrency, storage, payments, rewards, and representative invoices have
+passed end-to-end tests. Rolling back the Dart define returns to the old integration;
+ERP records created by the new service remain available for reconciliation.
+
+Protocol references: [Frappe REST](https://docs.frappe.io/framework/user/en/api/rest),
+[Shopify customer verification](https://shopify.dev/docs/api/storefront/latest/queries/customer),
+[Shopify discount creation](https://shopify.dev/docs/api/admin-graphql/latest/mutations/discountCodeBasicCreate),
+[Razorpay payment verification](https://razorpay.com/docs/api/payments/fetch-with-id/).

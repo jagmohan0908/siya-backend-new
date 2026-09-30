@@ -1,0 +1,13 @@
+{
+  "name": "siya-mobile-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13 <23" },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "setup:erp": "node --env-file-if-exists=.env scripts/setup-erp.mjs",
+    "check:dev": "node --env-file-if-exists=.env scripts/check-dev.mjs"
+  }
+}

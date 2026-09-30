@@ -1,0 +1,335 @@
+import {randomUUID} from 'node:crypto';
+import {ApiError, object, requireValue, text} from './errors.mjs';
+import {Records, SerialQueue, recordName} from './store.mjs';
+import {isPerfectDay} from './habits.mjs';
+
+const day = () => new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit'}).format(new Date());
+const statuses = {Pending: 'pending', Approved: 'confirmed', Confirmed: 'confirmed', 'Checked In': 'checked_in', Completed: 'completed', Cancelled: 'cancelled'};
+export const appointmentStatus = value => statuses[value] || 'pending';
+const cleanProfile = data => Object.fromEntries(['name','gender','dateOfBirth','height','weight'].filter(k => data[k] != null).map(k => [k, text(String(data[k]), 150)]));
+
+export class MobileService {
+  constructor({erp, webhookUrl, webhookSecret, fetcher = fetch, doctorPolicy = {}, rewardIssuer, payments}) {
+    Object.assign(this, {erp, webhookUrl, webhookSecret, fetcher, doctorPolicy, rewardIssuer, payments});
+    this.records = new Records(erp); this.queue = new SerialQueue();
+  }
+  async identity(user) {
+    let record = await this.records.read(user.id, 'identity', 'self');
+    if (record) return record.data;
+    // Only stable, verified external IDs may attach an existing ERP account.
+    const ids = [user.id, user.id.split('/').at(-1)];
+    let matches = await this.erp.list('Mobile App User', {external_id: ['in', ids]}, ['name'], {limit: 2});
+    requireValue(matches.length < 2, 'Your account needs to be linked by the clinic', 409, 'identity_link_required');
+    const parent = matches.length ? await this.erp.get('Mobile App User', matches[0].name) :
+      await this.erp.create('Mobile App User', {external_id: user.id, full_name: user.name, phone: user.phone, is_active: 1});
+    const patients = [...new Set((parent.profiles || []).map(p => p.patient_id).filter(Boolean))];
+    const data = {erpUser: parent.name, patient: patients.length === 1 ? patients[0] : null};
+    await this.records.write(user.id, 'identity', 'self', data, 0);
+    return data;
+  }
+  async profile(user) {
+    const identity = await this.identity(user);
+    const record = await this.records.read(user.id, 'profile', 'self');
+    return {data: {...(record?.data || {name: user.name}), email: user.email, phone: user.phone,
+      patientLinked: Boolean(identity.patient)}, revision: record?.revision || 0};
+  }
+  async saveProfile(user, body) {
+    object(body); const fields = cleanProfile(object(body.data));
+    requireValue(fields.name?.length, 'Please enter your name');
+    const old = await this.records.read(user.id, 'profile', 'self');
+    const saved = await this.records.write(user.id, 'profile', 'self', {...old?.data, ...fields}, body.revision);
+    const identity = await this.identity(user);
+    await this.erp.update('Mobile App User', identity.erpUser, {full_name: fields.name});
+    return saved;
+  }
+  async doctors() {
+    const response = await this.erp.method('mobile_app.api.practitioners.list_doctors');
+    return {doctors: response.doctors.filter(d => this.doctorPolicy[d.id]?.enabled).map(d => {
+      const policy = this.doctorPolicy[d.id];
+      return {id: d.id, name: d.name, specialization: d.specialty, qualification: d.specialty,
+        experienceYears: policy.experienceYears || 0, imageUrl: d.image_url ? new URL(d.image_url, this.erp.url).href : policy.imageUrl || '',
+        rating: 0, totalReviews: 0, consultationFee: policy.fee, languages: policy.languages || ['Hindi','English'],
+        about: policy.about || '', isAvailable: d.is_active, availableDays: [...new Set(d.schedules.flatMap(s => s.days))].map(v => v.slice(0,3)),
+        nextAvailableSlot: '', totalConsultations: 0, expertise: d.tags, availableConsultationType: policy.mode,
+        isFreeConsultation: policy.fee === 0};
+    }), timezone: response.timezone};
+  }
+  async reviewAvatars() {
+    const assets=await this.records.read('system','review_assets','indian-illustrations');
+    const result={};
+    if (!assets) return result;
+    for (const gender of ['man','woman']) {
+      const id=assets.data[gender];if (!id) continue;
+      const file=await this.erp.get('File',id);
+      requireValue(file.attached_to_doctype==='Siya Mobile Record' && file.attached_to_name===recordName('system','review_assets','indian-illustrations')
+        && !file.is_private,'Review image not available',404);
+      const signed=await this.erp.method('siya_clinic.api.s3_bucket.presign.get_presigned_url',{file_url:file.file_url,expires:900});
+      const url=typeof signed==='string'?signed:signed?.url;
+      if (url?.startsWith('https://')) result[gender]=url;
+    }
+    return result;
+  }
+  async availability(doctor, date, exclude) {
+    requireValue(this.doctorPolicy[doctor]?.enabled, 'Doctor not available', 404);
+    requireValue(/^\d{4}-\d{2}-\d{2}$/.test(date), 'Invalid date');
+    const result = await this.erp.method('mobile_app.api.practitioners.availability', {practitioner_id: doctor, date,
+      ...(exclude ? {exclude_booking_id: exclude} : {})});
+    // Include legacy/direct clinic bookings omitted by the existing mobile availability API.
+    const clinic = await this.erp.list('Clinic Appointment', {practitioner: doctor, appointment_date: date,
+      appointment_status: ['not in', ['Cancelled','No Show']]}, ['appointment_time'], {limit: 1000});
+    return {...result, slots: result.slots.filter(s => !clinic.some(b => String(b.appointment_time).slice(0,5) === s.time.slice(0,5)))};
+  }
+  async createAppointment(user, body, prepare = false) {
+    object(body); const id = text(body.id, 100);
+    requireValue(/^[a-zA-Z0-9-]{16,100}$/.test(id), 'A stable booking ID is required');
+    const existing = await this.records.read(user.id, 'appointment', id);
+    if (existing) {
+      requireValue(existing.data.doctorId===body.doctorId && existing.data.appointmentDate===String(body.appointmentDate).slice(0,10)
+        && existing.data.time===body.time && existing.data.consultationType===body.consultationType && existing.data.patientName===body.patientName,
+        'This booking ID already belongs to another appointment. Start a new booking.',409,'idempotency_conflict');
+      return prepare ? this.paymentOrder(user, existing) : this.deliverAppointment(user, existing, body.paymentId);
+    }
+    const doctor = text(body.doctorId); const policy = this.doctorPolicy[doctor];
+    requireValue(policy?.enabled, 'Doctor not available', 404);
+    requireValue(policy.fee === 0 || this.payments?.keyId, 'Payments are temporarily unavailable. No payment was taken.', 503, 'payment_setup_required');
+    requireValue(policy.fee === 0 || prepare, 'Prepare your appointment payment first',409);
+    const mode = text(body.consultationType);
+    requireValue(['video','opd','audio'].includes(mode) && (policy.mode === 'all' || policy.mode === mode), 'Consultation type not available');
+    const date = text(body.appointmentDate).slice(0,10);
+    const time = text(body.time, 8);
+    const reservationName = `SIYA-${recordName(user.id, 'appointment', id).slice(0,32)}`;
+    let reservation = await this.erp.maybe('Mobile App Appointment', reservationName);
+    const slots = await this.availability(doctor, date, reservation ? id : undefined);
+    const slot = slots.slots.find(s => s.time === time);
+    requireValue(slot, 'This slot is no longer available. Please select another.', 409, 'slot_unavailable');
+    requireValue(this.webhookUrl, 'Appointment booking is temporarily unavailable. No payment was taken.',503,'booking_setup_required');
+    const identity = await this.identity(user);
+    if (reservation) {
+      requireValue(reservation.mobile_app_user === identity.erpUser && reservation.practitioner_id === doctor &&
+        String(reservation.appointment_date).slice(0,10) === date && String(reservation.appointment_time).slice(0,5) === time.slice(0,5),
+        'This booking ID already refers to another appointment. Please contact the clinic.',409);
+    }
+    const patientName = text(body.patientName, 150);
+    const patientPhone = text(body.patientPhone || user.phone, 30);
+    requireValue(patientName && /^\+?[\d\s-]{10,20}$/.test(patientPhone), 'A patient name and valid contact phone number are required');
+    if (!reservation) reservation = await this.erp.create('Mobile App Appointment', {
+      appointment_external_id: reservationName, booking_id: id, mobile_app_user: identity.erpUser,
+      practitioner_id: doctor, practitioner_schedule: slot.schedule_id, appointment_date: date, appointment_time: time,
+      duration: slot.duration, status: 'Pending', consultation_type: mode, patient_name: patientName,
+      mobile_number: patientPhone, email: user.email, payload_json: JSON.stringify({source: 'siya-mobile-api', id}),
+    });
+    const saved = {id, doctorId: doctor, doctorName: reservation.doctor_name || doctor,
+      doctorImage: policy.imageUrl || '', specialization: '', appointmentDate: date, time,
+      timeSlot: `${String(Number(time.slice(0,2)) % 12 || 12).padStart(2,'0')}:${time.slice(3,5)} ${Number(time.slice(0,2)) < 12 ? 'AM' : 'PM'}`,
+      consultationType: mode, patientName, patientPhone, patientEmail: user.email,
+      symptoms: text(body.symptoms || '', 4000), consultationFee: policy.fee, status: 'pending',
+      createdAt: new Date().toISOString(), paymentStatus: policy.fee === 0 ? 'free' : 'pending', paymentId: policy.fee === 0 ? `FREE-${id}` : null,
+      reservation: reservationName, bookingSyncPending: true, deliveryState: 'not_sent'};
+    const record = await this.records.write(user.id, 'appointment', id, saved, 0);
+    return prepare ? this.paymentOrder(user,record) : this.deliverAppointment(user,record,body.paymentId);
+  }
+  async paymentOrder(user, record) {
+    requireValue(record.data.consultationFee > 0 && this.payments?.keyId,'Payment is not available',503);
+    if (record.data.paymentOrderId) return {orderId:record.data.paymentOrderId,keyId:this.payments.keyId,amount:record.data.consultationFee};
+    requireValue(!record.data.paymentOrderRequested,'Payment preparation is pending. Contact the clinic before retrying.',409,'payment_order_pending');
+    record = await this.records.write(user.id,'appointment',record.data.id,{...record.data,paymentOrderRequested:true},record.revision);
+    const order=await this.payments.create(user,record.data);
+    await this.records.write(user.id,'appointment',record.data.id,{...record.data,paymentOrderId:order.id},record.revision);
+    return {orderId:order.id,keyId:this.payments.keyId,amount:record.data.consultationFee};
+  }
+  async deliverAppointment(user, record, paymentId) {
+    if (record.data.deliveryState !== 'not_sent') return this.refreshAppointment(user,record);
+    if (record.data.consultationFee > 0) {
+      await this.payments.verify(user,record.data,paymentId);
+      record=await this.records.write(user.id,'appointment',record.data.id,{...record.data,paymentId,paymentStatus:'paid'},record.revision);
+    }
+    const saved=record.data; const id=saved.id; const identity=await this.identity(user);
+    // Persist intent before external delivery. Uncertain delivery is reconciled, never blindly replayed.
+    record = await this.records.write(user.id, 'appointment', id, {...saved, deliveryState: 'sent'}, record.revision);
+    if (!this.webhookUrl) return record.data;
+    try {
+      const response = await this.fetcher(this.webhookUrl, {method: 'POST', headers: {'Content-Type': 'application/json',
+        'Idempotency-Key': id, ...(this.webhookSecret ? {'X-Mobile-Webhook-Secret': this.webhookSecret} : {})},
+        body: JSON.stringify({event: 'appointment.created', ...saved, fee: saved.consultationFee,
+          patient: {name: saved.patientName, phone: saved.patientPhone, email: user.email},
+          erpMobileUser: identity.erpUser, erpReservation: saved.reservation, erpPatientId: identity.patient}),
+        signal: AbortSignal.timeout(25000), redirect: 'error'});
+      if (!response.ok) return record.data;
+      let result = await response.json(); if (Array.isArray(result)) result = result.length === 1 ? result[0] : null;
+      const encounter = result?.data ?? result;
+      if (encounter?.doctype !== 'Patient Encounter' || !encounter.name) return record.data;
+      return await this.attachEncounter(user, record, encounter.name);
+    } catch { return record.data; }
+  }
+  async attachEncounter(user, record, encounterId) {
+    const encounter = await this.erp.get('Patient Encounter', encounterId);
+    // A webhook cannot attach another patient's arbitrary encounter to this account.
+    requireValue(encounter.docstatus !== 2 && (encounter.sr_notes || '').includes(`External appointment ID: ${record.data.id}`), 'Appointment response could not be verified', 409);
+    const identity = await this.identity(user);
+    const data = {...record.data, erpEncounterId: encounter.name, erpPatientId: encounter.patient,
+      erpAppointmentReference: encounter.encounter_reference, status: appointmentStatus(encounter.custom_appointment_status),
+      meetingLink: encounter.google_meet_link || null, bookingSyncPending: false, deliveryState: 'acknowledged'};
+    await this.erp.update('Mobile App Appointment', data.reservation, {patient_encounter: encounter.name});
+    // Do not automatically grant access to a historical patient matched by phone inside n8n.
+    // An existing explicit account->Patient mapping remains the authority for records/invoices.
+    const saved = await this.records.write(user.id, 'appointment', data.id, data, record.revision);
+    return saved.data;
+  }
+  async refreshAppointment(user, record) {
+    if (record.data.erpEncounterId) {
+      const enc = await this.erp.get('Patient Encounter', record.data.erpEncounterId);
+      return {...record.data, status: appointmentStatus(enc.custom_appointment_status), meetingLink: enc.google_meet_link || record.data.meetingLink};
+    }
+    if (record.data.deliveryState === 'sent') {
+      const matches = await this.erp.list('Patient Encounter', {sr_notes: ['like', `%External appointment ID: ${record.data.id}%`]}, ['name'], {limit: 2});
+      if (matches.length === 1) return this.attachEncounter(user, record, matches[0].name);
+    }
+    return record.data;
+  }
+  async appointments(user) {
+    const rows = await this.records.list(user.id, 'appointment');
+    const items = [];
+    for (const row of rows) items.push(await this.refreshAppointment(user, row));
+    return {items};
+  }
+  async appointmentChange(user, id, body) {
+    const record = await this.records.read(user.id, 'appointment', id);
+    requireValue(record, 'Appointment not found', 404);
+    requireValue(['cancel','reschedule'].includes(body.action), 'Invalid appointment action');
+    // Requests go to the clinic; do not pretend the authoritative appointment changed.
+    const requestId = text(body.requestId, 100);
+    const prior = await this.records.read(user.id, 'appointment_request', requestId);
+    if (prior) return prior.data;
+    const request = {id: requestId, appointmentId: id, action: body.action, date: body.date, time: body.time,
+      status: 'Pending', createdAt: new Date().toISOString()};
+    await this.records.write(user.id, 'appointment_request', requestId, request, 0);
+    return request;
+  }
+  async treatment(user, body) {
+    const id = text(body.id, 100); object(body.answers);
+    requireValue(/^[a-zA-Z0-9-]{16,100}$/.test(id), 'Invalid assessment ID');
+    const prior = await this.records.read(user.id, 'treatment', id);
+    if (prior) return prior;
+    const identity = await this.identity(user);
+    return this.records.write(user.id, 'treatment', id, {id, patient: identity.patient, questionnaireVersion: text(body.questionnaireVersion, 100),
+      answers: body.answers, result: body.result || {}, createdAt: new Date().toISOString()}, 0);
+  }
+  async patient(user) {
+    const {patient} = await this.identity(user);
+    requireValue(patient, 'Please ask the clinic to link your patient record to your account.', 409, 'patient_link_required');
+    return this.erp.get('Patient', patient);
+  }
+  async diets(user) {
+    const patient = await this.patient(user);
+    const links = await this.erp.list('Patient Encounter', {patient: patient.name, docstatus: ['<',2], diet_chart: ['is','set']},
+      ['name','diet_chart','encounter_date'], {limit: 50});
+    const items = [];
+    for (const link of links) {
+      const chart = await this.erp.get('Diet Chart', link.diet_chart);
+      items.push({id: link.name, date: link.encounter_date, title: chart.diet_chart_name,
+        instructions: chart.instructions, allowedFoods: chart.allowed_foods, restrictedFoods: chart.restricted_foods});
+    }
+    return {items};
+  }
+  async orders(user, offset = 0) {
+    const patient = await this.patient(user);
+    const identity = await this.identity(user);
+    // Patient-scoped invoices prevent a shared Customer from exposing another family member's care.
+    const rows = await this.erp.list('Sales Invoice', identity.customers?.length ? {docstatus:1} : {patient: patient.name, docstatus: 1},
+      ['name','posting_date','grand_total','currency','status','outstanding_amount','is_return','return_against',
+        'sr_si_order_source','si_shipkia_shipment_status','si_shipkia_awb_number'], {offset, limit: 21, order: 'posting_date desc, name desc',
+        ...(identity.customers?.length ? {orFilters:[['patient','=',patient.name],['customer','in',identity.customers]]} : {})});
+    const orders = identity.customers?.length ? await this.erp.list('Sales Order', {customer:['in',identity.customers],docstatus:1,per_billed:['<',100]},
+      ['name','transaction_date','grand_total','currency','status'], {offset,limit:21,order:'transaction_date desc, name desc'}) : [];
+    return {items: [...orders.slice(0,20).map(r => ({id:r.name,date:r.transaction_date,total:r.grand_total,currency:r.currency,
+      documentType:'Sales Order',paymentStatus:'Awaiting invoice',deliveryStatus:r.status})), ...rows.slice(0,20).map(r => ({id: r.name, date: r.posting_date, total: r.grand_total, currency: r.currency,
+      documentType:'Sales Invoice',
+      paymentStatus: r.status, outstanding: r.outstanding_amount, isReturn: Boolean(r.is_return), returnAgainst: r.return_against,
+      source: r.sr_si_order_source, deliveryStatus: r.si_shipkia_shipment_status, trackingNumber: r.si_shipkia_awb_number}))],
+      nextCursor: rows.length > 20 || orders.length > 20 ? offset + 20 : null};
+  }
+  async invoice(user, id, pdf = false) {
+    const patient = await this.patient(user);
+    const identity=await this.identity(user);
+    const invoice = await this.erp.get('Sales Invoice', id);
+    requireValue((invoice.patient === patient.name || identity.customers?.includes(invoice.customer)) && invoice.docstatus === 1, 'Invoice not found', 404);
+    if (pdf) return this.erp.request(`/api/method/frappe.utils.print_format.download_pdf?${new URLSearchParams({doctype:'Sales Invoice',name:id,format:'Standard',no_letterhead:'0'})}`, {raw:true});
+    return {id: invoice.name, date: invoice.posting_date, currency: invoice.currency, total: invoice.grand_total,
+      paymentStatus: invoice.status, outstanding: invoice.outstanding_amount, isReturn: Boolean(invoice.is_return),
+      items: invoice.items.map(i => ({name:i.item_name,quantity:i.qty,rate:i.rate,total:i.amount}))};
+  }
+  async upload(user, body) {
+    const identity = await this.identity(user);
+    requireValue(['image/jpeg','image/png','image/webp'].includes(body.mimeType), 'Only JPEG, PNG and WebP images are allowed');
+    const bytes = Buffer.from(text(body.base64, 12_000_000), 'base64');
+    requireValue(bytes.length > 0 && bytes.length <= 8 * 1024 * 1024, 'Image must be under 8 MB');
+    const valid = body.mimeType === 'image/jpeg' ? bytes.subarray(0,3).equals(Buffer.from([255,216,255])) :
+      body.mimeType === 'image/png' ? bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])) :
+      bytes.subarray(0,4).toString() === 'RIFF' && bytes.subarray(8,12).toString() === 'WEBP';
+    requireValue(valid, 'File contents do not match the image type');
+    const form = new FormData(); const ext = {'image/jpeg':'jpg','image/png':'png','image/webp':'webp'}[body.mimeType];
+    form.append('file', new Blob([bytes], {type:body.mimeType}), `${randomUUID()}.${ext}`);
+    form.append('is_private','1'); form.append('doctype','Mobile App User'); form.append('docname',identity.erpUser);
+    const file = await this.erp.request('/api/method/upload_file', {method:'POST',body:form});
+    requireValue(file.file_url?.startsWith('s3://'), 'ERP S3 upload is not enabled. Please contact the clinic.', 503, 's3_required');
+    if (body.purpose !== 'treatment') {
+      const prior = await this.records.read(user.id,'profile','self');
+      await this.records.write(user.id,'profile','self',{...(prior?.data || {name:user.name}),imageFileId:file.name},prior?.revision || 0);
+    }
+    return {fileId:file.name};
+  }
+  async file(user, id) {
+    const identity = await this.identity(user);
+    const file = await this.erp.get('File', id);
+    requireValue(file.attached_to_doctype === 'Mobile App User' && file.attached_to_name === identity.erpUser, 'File not found',404);
+    requireValue(file.file_url?.startsWith('s3://'), 'File is not available',404);
+    const signed = await this.erp.method('siya_clinic.api.s3_bucket.presign.get_presigned_url', {file_url:file.file_url,expires:300});
+    const url = typeof signed === 'string' ? signed : signed?.url;
+    requireValue(url?.startsWith('https://'), 'File is temporarily unavailable',503);
+    return {url,expiresIn:300};
+  }
+  async habits(user) {
+    return await this.records.read(user.id,'habits','self') || {data:null,revision:0};
+  }
+  async saveHabits(user, body) {
+    const incoming = object(body.data); const old = await this.habits(user);
+    requireValue(body.revision === old.revision,'Habits changed on another device. Refresh and try again.',409,'revision_conflict');
+    requireValue(Array.isArray(incoming.habits) && incoming.habits.length <= 100, 'Invalid habits');
+    object(incoming.dailyCompliance);
+    // Preserve historical entries. Only today's entry can be edited; imported legacy history is separate.
+    const today = day();
+    const daily = {...old.data?.dailyCompliance};
+    if (incoming.dailyCompliance[today]) daily[today] = incoming.dailyCompliance[today];
+    const data = {...incoming, userId:user.id, dailyCompliance:daily, rewards:old.data?.rewards || [],
+      currentStreak:0, longestStreak:old.data?.longestStreak || 0, lastUpdated:new Date().toISOString()};
+    const ids = incoming.habits.filter(h => h.isActive !== false).map(h => h.id);
+    let streak = 0;
+    const cursor = new Date(`${today}T12:00:00Z`);
+    if (!isPerfectDay(daily[today],ids)) cursor.setUTCDate(cursor.getUTCDate()-1);
+    while (isPerfectDay(daily[cursor.toISOString().slice(0,10)],ids)) {
+      streak++; cursor.setUTCDate(cursor.getUTCDate()-1);
+    }
+    data.currentStreak = streak; data.longestStreak = Math.max(streak,data.longestStreak);
+    // Eligibility uses the server-approved plan, never a client-created plan or client streak count.
+    let persisted = await this.records.write(user.id,'habits','self',data,body.revision);
+    const plan = await this.records.read(user.id,'habit_plan','self');
+    if (streak >= 30 && plan?.data?.habitIds?.length && JSON.stringify([...plan.data.habitIds].sort()) === JSON.stringify([...ids].sort()) && this.rewardIssuer) {
+      const cycle = `${cursor.toISOString().slice(0,10)}-${Math.floor(streak/30)}`;
+      const key = recordName(user.id,'reward',cycle);
+      let reward = await this.records.read(user.id,'reward',key);
+      if (!reward) reward = await this.records.write(user.id,'reward',key,{id:key,code:`SIYA${key.slice(0,16).toUpperCase()}`,state:'pending',
+        createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+90*86400000).toISOString()},0);
+      if (reward.data.state !== 'issued') {
+        try { await this.rewardIssuer(user,reward.data); }
+        catch { return {...persisted,rewardPending:true}; }
+        reward = await this.records.write(user.id,'reward',key,{...reward.data,state:'issued'},reward.revision);
+      }
+      if (!data.rewards.some(r => r.id === key)) data.rewards.push({id:key,couponCode:reward.data.code,discountPercent:5,
+        earnedAt:reward.data.createdAt,expiresAt:reward.data.expiresAt,isUsed:false,streakDays:30});
+    }
+    if (data.rewards.length !== (old.data?.rewards || []).length) {
+      persisted = await this.records.write(user.id,'habits','self',data,persisted.revision);
+    }
+    return persisted;
+  }
+}
