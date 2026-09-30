@@ -9,8 +9,9 @@ export const appointmentStatus = value => statuses[value] || 'pending';
 const cleanProfile = data => Object.fromEntries(['name','gender','dateOfBirth','height','weight'].filter(k => data[k] != null).map(k => [k, text(String(data[k]), 150)]));
 
 export class MobileService {
-  constructor({erp, webhookUrl, webhookSecret, fetcher = fetch, doctorPolicy = {}, rewardIssuer, payments}) {
-    Object.assign(this, {erp, webhookUrl, webhookSecret, fetcher, doctorPolicy, rewardIssuer, payments});
+  constructor({erp, webhookUrl, webhookSecret, fetcher = fetch, doctorPolicy = {}, rewardIssuer, payments,
+    s3PresignMethod = 'sriaas_clinic.api.s3.presign.get_presigned_url'}) {
+    Object.assign(this, {erp, webhookUrl, webhookSecret, fetcher, doctorPolicy, rewardIssuer, payments, s3PresignMethod});
     this.records = new Records(erp); this.queue = new SerialQueue();
   }
   async identity(user) {
@@ -30,7 +31,26 @@ export class MobileService {
   async profile(user) {
     const identity = await this.identity(user);
     const record = await this.records.read(user.id, 'profile', 'self');
-    return {data: {...(record?.data || {name: user.name}), email: user.email, phone: user.phone,
+    const parent = await this.erp.get('Mobile App User', identity.erpUser);
+    // The Desk avatar and app avatar share this field, including image removal.
+    // Never let a stale app record override a photo changed by clinic staff.
+    let imageReference = parent.image;
+    if (imageReference) {
+      try {
+        const uri = new URL(imageReference, this.erp.url);
+        if (uri.origin === new URL(this.erp.url).origin && uri.pathname === '/api/method/frappe.handler.download_file') {
+          imageReference = uri.searchParams.get('file_url');
+        }
+      } catch { imageReference = null; }
+    }
+    const files = imageReference ? await this.erp.list('File', {
+      attached_to_doctype: 'Mobile App User', attached_to_name: identity.erpUser,
+      file_url: imageReference,
+    }, ['name','file_url'], {limit: 1}) : [];
+    const image = files.find(file => file.file_url?.startsWith('s3://'));
+    return {data: {...(record?.data || {}), name: parent.full_name || user.name,
+      imageFileId: image?.name || null, imageSyncPending: Boolean(parent.image && !image),
+      email: user.email, phone: user.phone,
       patientLinked: Boolean(identity.patient)}, revision: record?.revision || 0};
   }
   async saveProfile(user, body) {
@@ -63,7 +83,7 @@ export class MobileService {
       const file=await this.erp.get('File',id);
       requireValue(file.attached_to_doctype==='Siya Mobile Record' && file.attached_to_name===recordName('system','review_assets','indian-illustrations')
         && !file.is_private,'Review image not available',404);
-      const signed=await this.erp.method('siya_clinic.api.s3_bucket.presign.get_presigned_url',{file_url:file.file_url,expires:900});
+      const signed=await this.erp.method(this.s3PresignMethod,{file_url:file.file_url,expires:900});
       const url=typeof signed==='string'?signed:signed?.url;
       if (url?.startsWith('https://')) result[gender]=url;
     }
@@ -260,6 +280,8 @@ export class MobileService {
   }
   async upload(user, body) {
     const identity = await this.identity(user);
+    const isProfile = body.purpose !== 'treatment';
+    const parent = isProfile ? await this.erp.get('Mobile App User', identity.erpUser) : null;
     requireValue(['image/jpeg','image/png','image/webp'].includes(body.mimeType), 'Only JPEG, PNG and WebP images are allowed');
     const bytes = Buffer.from(text(body.base64, 12_000_000), 'base64');
     requireValue(bytes.length > 0 && bytes.length <= 8 * 1024 * 1024, 'Image must be under 8 MB');
@@ -268,13 +290,33 @@ export class MobileService {
       bytes.subarray(0,4).toString() === 'RIFF' && bytes.subarray(8,12).toString() === 'WEBP';
     requireValue(valid, 'File contents do not match the image type');
     const form = new FormData(); const ext = {'image/jpeg':'jpg','image/png':'png','image/webp':'webp'}[body.mimeType];
-    form.append('file', new Blob([bytes], {type:body.mimeType}), `${randomUUID()}.${ext}`);
+    const uploadName = `${randomUUID()}.${ext}`;
+    form.append('file', new Blob([bytes], {type:body.mimeType}), uploadName);
     form.append('is_private','1'); form.append('doctype','Mobile App User'); form.append('docname',identity.erpUser);
-    const file = await this.erp.request('/api/method/upload_file', {method:'POST',body:form});
+    let uploaded;
+    try {
+      uploaded = await this.erp.request('/api/method/upload_file', {method:'POST',body:form,timeoutMs:50000});
+    } catch (error) {
+      if (error.name !== 'TimeoutError') throw error;
+      // An ERP upload can commit before its response arrives. Reconcile this
+      // exact upload once; never blindly POST a second file after a timeout.
+      const matches = await this.erp.list('File', {file_name:uploadName,
+        attached_to_doctype:'Mobile App User',attached_to_name:identity.erpUser}, ['name'], {limit:2});
+      if (matches.length !== 1) throw error;
+      uploaded = matches[0];
+    }
+    const file = await this.erp.get('File', uploaded.name);
+    requireValue(file.attached_to_doctype === 'Mobile App User' && file.attached_to_name === identity.erpUser,
+      'Uploaded file does not belong to your profile', 409);
     requireValue(file.file_url?.startsWith('s3://'), 'ERP S3 upload is not enabled. Please contact the clinic.', 503, 's3_required');
-    if (body.purpose !== 'treatment') {
-      const prior = await this.records.read(user.id,'profile','self');
-      await this.records.write(user.id,'profile','self',{...(prior?.data || {name:user.name}),imageFileId:file.name},prior?.revision || 0);
+    if (isProfile) {
+      // Keep the ERP Desk avatar in sync. Passing modified rejects an overwrite
+      // if clinic staff changed this document while the file was uploading.
+      // Desk needs an HTTP image URL. This stable ERP route uses the logged-in
+      // ERP session to serve the private S3 file; never store an expiring link.
+      const image = `/api/method/frappe.handler.download_file?${new URLSearchParams({file_url:file.file_url})}`;
+      await this.erp.update('Mobile App User', identity.erpUser,
+        {image, ...(parent.modified ? {modified:parent.modified} : {})});
     }
     return {fileId:file.name};
   }
@@ -283,7 +325,7 @@ export class MobileService {
     const file = await this.erp.get('File', id);
     requireValue(file.attached_to_doctype === 'Mobile App User' && file.attached_to_name === identity.erpUser, 'File not found',404);
     requireValue(file.file_url?.startsWith('s3://'), 'File is not available',404);
-    const signed = await this.erp.method('siya_clinic.api.s3_bucket.presign.get_presigned_url', {file_url:file.file_url,expires:300});
+    const signed = await this.erp.method(this.s3PresignMethod, {file_url:file.file_url,expires:300});
     const url = typeof signed === 'string' ? signed : signed?.url;
     requireValue(url?.startsWith('https://'), 'File is temporarily unavailable',503);
     return {url,expiresIn:300};

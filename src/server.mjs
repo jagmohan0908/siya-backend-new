@@ -93,6 +93,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const erp = new Erp({url:process.env.ERP_URL,token:process.env.ERP_TOKEN});
   const doctorPolicy = JSON.parse(await readFile(new URL('../doctor-policy.json',import.meta.url),'utf8'));
   const service = new MobileService({erp,doctorPolicy,webhookUrl:process.env.APPOINTMENT_WEBHOOK_URL,
+    s3PresignMethod:process.env.S3_PRESIGN_METHOD,
     payments:new Razorpay({keyId:process.env.RAZORPAY_KEY_ID,keySecret:process.env.RAZORPAY_KEY_SECRET}),
     webhookSecret:process.env.APPOINTMENT_WEBHOOK_SECRET,rewardIssuer:createRewardIssuer({domain:process.env.SHOPIFY_DOMAIN,adminToken:process.env.SHOPIFY_ADMIN_TOKEN})});
   const server = createApi({service,authenticate:createAuthenticator({domain:process.env.SHOPIFY_DOMAIN,storefrontToken:process.env.SHOPIFY_STOREFRONT_TOKEN}),

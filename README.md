@@ -185,6 +185,24 @@ new local discount codes when using this backend.
 
 ## Files and images
 
+Profile photos are synchronized through **Mobile App User.image**. An app upload
+updates this field after its private File reaches S3. The value is a stable ERP
+download route (not an expiring S3 link), so authenticated Desk users can display
+the sidebar photo. The API also accepts the raw S3 File URL selected by Desk,
+checks that the File belongs to this user, and returns its File ID. Removing the
+ERP image clears the app photo; old app/Supabase photo caches do not override it.
+
+The Flutter profile refreshes when opened or resumed and every 30 seconds while
+visible in the foreground. An unsaved photo selection is preserved. This is
+periodic refresh, not an instantaneous push notification.
+
+`S3_PRESIGN_METHOD` defaults to
+`sriaas_clinic.api.s3.presign.get_presigned_url`, verified against dev ERP. Set it
+to the installed method if another environment uses a different ERP app module.
+Uploads allow 50 seconds for ERP/S3 and reconcile a timed-out request by its
+unique filename and verified owner before returning an error. They never blindly
+repeat the upload. Deploy the updated backend and rebuild the app for this flow.
+
 The ERP S3 pipeline must be configured and healthy. Private app uploads are linked
 to the verified Mobile App User; clients cannot provide an arbitrary ERP owner.
 The API checks image magic bytes and rejects uploads that did not reach S3.

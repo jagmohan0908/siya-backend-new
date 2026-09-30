@@ -4,11 +4,11 @@ export class Erp {
   constructor({url, token, fetcher = fetch}) {
     this.url = url.replace(/\/$/, ''); this.token = token; this.fetcher = fetcher;
   }
-  async request(path, {method = 'GET', body, raw = false} = {}) {
+  async request(path, {method = 'GET', body, raw = false, timeoutMs = 25000} = {}) {
     const response = await this.fetcher(`${this.url}${path}`, {
       method, headers: {Authorization: `token ${this.token}`, ...(body instanceof FormData ? {} : {'Content-Type': 'application/json'})},
       body: body == null ? undefined : body instanceof FormData ? body : JSON.stringify(body),
-      signal: AbortSignal.timeout(25000), redirect: 'error',
+      signal: AbortSignal.timeout(timeoutMs), redirect: 'error',
     });
     if (!response.ok) {
       // Never relay ERP stack traces, request bodies or credentials to the app.

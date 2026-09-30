@@ -2,6 +2,34 @@
 
 This file distinguishes implemented/tested paths from a live production migration.
 
+## Profile photo synchronization follow-up
+
+- Backend suite: 32 tests passed, including ERP photo replacement/removal,
+  attachment ownership, app-to-ERP photo updates, treatment isolation, S3 failure,
+  concurrent parent edits, correct signing method, and upload timeout recovery.
+- Flutter suite: 25 tests passed. Three new widget tests verify visible/foreground
+  refresh, app resume, disabled/hidden screens, and non-overlapping request recovery.
+- Updated Android debug APK built successfully against the Render URL. Changed
+  Dart files analyzed without errors; existing warnings/style notices remain.
+- Live dev test used a separate synthetic Mobile App User, not the customer's
+  profile. S3 image download returned 200; selecting/removing the ERP image was
+  reflected by the backend profile response. A subsequent app-style upload
+  completed in about 40 seconds and updated the ERP image route and app File ID.
+- The stable ERP sidebar image route returned 200 with credentials and 403 to
+  an unauthenticated request. The original signing path referenced an app absent
+  from dev; the installed `sriaas_clinic.api.s3.presign.get_presigned_url` was
+  verified and configured as the default.
+- These live checks exercised the new backend code locally against dev ERP.
+  They do not assert that Render has deployed this new commit or that a phone
+  running an older APK has the refresh changes.
+- The first upload committed after its 25-second timeout. Later testing used a
+  50-second upload timeout. Synthetic cleanup initially timed out/returned 500;
+  any remaining fixture uses account
+  `integration-test:profile-photo-82bd36d5-93dc-4980-a155-bd3321502694`.
+
+The earlier staged-migration results below are retained as historical context;
+the photo follow-up above supersedes their unverified S3-download status.
+
 This standalone repository contains the backend and its 24-test suite. The
 backend suite was rerun successfully after extraction. Flutter and live ERP
 results below describe the earlier integration checks in the app repository;

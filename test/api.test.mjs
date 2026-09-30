@@ -183,3 +183,95 @@ test('HTTP booking writes stay disabled until deployment is explicitly enabled',
     method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(booking)});
   assert.equal(response.status,503);assert.equal((await response.json()).error.code,'booking_setup_required');
 });
+
+test('ERP avatar changes and removal override stale app photo references', async () => {
+  const {service,erp}=setup();const identity=await service.identity(user);
+  await service.records.write(user.id,'profile','self',{name:user.name,imageFileId:'stale-file'},0);
+  const first=await erp.create('File',{attached_to_doctype:'Mobile App User',attached_to_name:identity.erpUser,file_url:'s3://bucket/first.jpg'});
+  await erp.update('Mobile App User',identity.erpUser,{image:first.file_url});
+  assert.equal((await service.profile(user)).data.imageFileId,first.name);
+  const second=await erp.create('File',{attached_to_doctype:'Mobile App User',attached_to_name:identity.erpUser,file_url:'s3://bucket/second.jpg'});
+  await erp.update('Mobile App User',identity.erpUser,{image:second.file_url});
+  assert.equal((await service.profile(user)).data.imageFileId,second.name);
+  await erp.update('Mobile App User',identity.erpUser,{image:''});
+  const cleared=await service.profile(user);
+  assert.equal(cleared.data.imageFileId,null);assert.equal(cleared.data.imageSyncPending,false);
+});
+
+test('an ERP avatar cannot expose an attachment owned by another account', async () => {
+  const {service,erp}=setup();const identity=await service.identity(user);
+  const file=await erp.create('File',{attached_to_doctype:'Mobile App User',attached_to_name:'another',file_url:'s3://bucket/private.jpg'});
+  await erp.update('Mobile App User',identity.erpUser,{image:file.file_url});
+  const profile=await service.profile(user);
+  assert.equal(profile.data.imageFileId,null);assert.equal(profile.data.imageSyncPending,true);
+});
+
+async function fakeUpload(service,erp,{storage='s3://bucket/upload.jpg',duringUpload}={}) {
+  const identity=await service.identity(user);
+  erp.request=async (_,request)=>{
+    assert.equal(request.body.get('docname'),identity.erpUser);
+    assert.equal(request.body.get('is_private'),'1');
+    const file=await erp.create('File',{attached_to_doctype:'Mobile App User',attached_to_name:identity.erpUser,file_url:storage});
+    await duringUpload?.();
+    return {name:file.name,file_url:'/stale-upload-response.jpg'};
+  };
+  return identity;
+}
+const photo={mimeType:'image/jpeg',base64:Buffer.from([255,216,255,1]).toString('base64')};
+
+test('app photo uploads update the ERP Desk image from the saved S3 File',async()=>{
+  const {service,erp}=setup();const identity=await fakeUpload(service,erp);
+  const result=await service.upload(user,photo);
+  const image = new URL((await erp.get('Mobile App User',identity.erpUser)).image, erp.url);
+  assert.equal(image.pathname,'/api/method/frappe.handler.download_file');
+  assert.equal(image.searchParams.get('file_url'),'s3://bucket/upload.jpg');
+  assert.equal((await service.profile(user)).data.imageFileId,result.fileId);
+});
+
+test('treatment attachments do not replace the profile photo',async()=>{
+  const {service,erp}=setup();const identity=await fakeUpload(service,erp);
+  await erp.update('Mobile App User',identity.erpUser,{image:'s3://bucket/original.jpg'});
+  await service.upload(user,{...photo,purpose:'treatment'});
+  assert.equal((await erp.get('Mobile App User',identity.erpUser)).image,'s3://bucket/original.jpg');
+});
+
+test('failed S3 migration preserves the current ERP photo',async()=>{
+  const {service,erp}=setup();const identity=await fakeUpload(service,erp,{storage:'/private/files/pending.jpg'});
+  await erp.update('Mobile App User',identity.erpUser,{image:'s3://bucket/original.jpg'});
+  await assert.rejects(service.upload(user,photo),{code:'s3_required'});
+  assert.equal((await erp.get('Mobile App User',identity.erpUser)).image,'s3://bucket/original.jpg');
+});
+
+test('a profile edited during upload is not silently overwritten',async()=>{
+  const {service,erp}=setup();const identity=await fakeUpload(service,erp);
+  await erp.update('Mobile App User',identity.erpUser,{modified:'before'});
+  const update=erp.update.bind(erp);
+  erp.update=async(type,name,fields)=>{
+    if(type==='Mobile App User' && fields.image){assert.equal(fields.modified,'before');throw new ApiError(409,'revision_conflict','Changed');}
+    return update(type,name,fields);
+  };
+  await assert.rejects(service.upload(user,photo),{status:409});
+});
+
+test('private photo signing uses the installed ERP app and preserves signed URLs',async()=>{
+  const {service,erp}=setup();const identity=await service.identity(user);
+  const file=await erp.create('File',{attached_to_doctype:'Mobile App User',attached_to_name:identity.erpUser,file_url:'s3://bucket/image.jpg'});
+  erp.method=async(method,args)=>{
+    assert.equal(method,'sriaas_clinic.api.s3.presign.get_presigned_url');
+    assert.equal(args.file_url,file.file_url);assert.equal(args.expires,300);
+    return 'https://storage.test/image.jpg?signature=keep-exactly';
+  };
+  assert.deepEqual(await service.file(user,file.name),{url:'https://storage.test/image.jpg?signature=keep-exactly',expiresIn:300});
+});
+
+test('a committed upload with a lost response is reconciled without another POST',async()=>{
+  const {service,erp}=setup();const identity=await service.identity(user);let posts=0;
+  erp.request=async (_,request)=>{
+    posts++;
+    await erp.create('File',{file_name:request.body.get('file').name,attached_to_doctype:'Mobile App User',attached_to_name:identity.erpUser,file_url:'s3://bucket/committed.jpg'});
+    throw new DOMException('Timed out','TimeoutError');
+  };
+  const uploaded=await service.upload(user,photo);
+  assert.equal(posts,1);
+  assert.equal((await service.profile(user)).data.imageFileId,uploaded.fileId);
+});
