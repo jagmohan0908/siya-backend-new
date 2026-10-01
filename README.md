@@ -5,9 +5,12 @@ service has no separate patient database. Shopify continues to own catalog,
 checkout, login-token verification, and issued discount codes. ERP File records
 own S3 attachment metadata. n8n remains responsible for appointment automation.
 
-**This is a staged implementation, not a completed production cutover.** Builds
-without `MOBILE_API_BASE_URL` retain the existing integrations. Configured builds
-use the new API and never silently fall back to Shopify/Supabase for ERP records.
+**This is a staged implementation, not a completed production cutover.** Debug/IDE
+builds default to `https://siya-backend-new.onrender.com` so a normal restart does
+not switch profile uploads back to Supabase. Release/profile builds still require
+`--dart-define=MOBILE_API_BASE_URL=https://siya-backend-new.onrender.com` for the
+staged API. An explicit empty define selects the legacy build for comparison.
+Configured builds never silently fall back to Shopify/Supabase for ERP records.
 The reference `mobile_app` ERP source has not been modified.
 
 ## Repository layout
