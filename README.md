@@ -244,3 +244,33 @@ Protocol references: [Frappe REST](https://docs.frappe.io/framework/user/en/api/
 [Shopify customer verification](https://shopify.dev/docs/api/storefront/latest/queries/customer),
 [Shopify discount creation](https://shopify.dev/docs/api/admin-graphql/latest/mutations/discountCodeBasicCreate),
 [Razorpay payment verification](https://razorpay.com/docs/api/payments/fetch-with-id/).
+
+
+## Local ERP through ngrok
+
+The current development ERP root is `https://emission-stable-jackknife.ngrok-free.dev`.
+Use that origin as `ERP_URL`, without `/app/doctor-clinical`. The Flutter app still
+connects to the Render mobile API; do not put the ERP origin or token in Flutter.
+
+Set `ERP_URL` and the **local ERP** integration account's `ERP_TOKEN` in Render's
+Environment settings as well as the ignored local `.env`. A Git push does not
+upload `.env` or change Render environment variables. Keep `BOOKINGS_ENABLED=false`
+until the booking workflow targets this same ERP and passes its existing checks.
+The local Frappe server and ngrok tunnel must both be running for Render to reach it.
+
+Run `npm run setup:erp` on the selected ERP once to add the app's storage DocType,
+then `npm run check:dev`. The smoke check allows the original dev host and this
+specific ngrok host; writes still require `DEV_TEST_WRITES=1` explicitly.
+The local account needs access to Healthcare Practitioner, Practitioner Schedule,
+Patient Appointment, Doctor Availability Exception, Mobile App User, Mobile App
+Appointment, Clinic Appointment, Siya Mobile Record, Patient, Patient Encounter,
+Diet Chart, Sales Invoice, Sales Order, File, and the configured S3 signing method.
+Existing doctypes retain their ERP permissions; the backend never bypasses them.
+
+This is a different ERP database. Confirm existing account/patient links, historical
+app records and S3 files before switching users; changing the URL does not migrate
+these records. Point n8n's ERP connection at the same database before enabling bookings.
+
+For ngrok hosts, API, upload and PDF requests send the documented
+[`ngrok-skip-browser-warning` header](https://ngrok.com/abuse#browser-warning).
+ERP authentication remains required.

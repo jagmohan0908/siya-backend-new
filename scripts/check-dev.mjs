@@ -4,7 +4,8 @@ import {Erp} from '../src/erp.mjs';
 import {Records,recordName} from '../src/store.mjs';
 
 const erp = new Erp({url:process.env.ERP_URL,token:process.env.ERP_TOKEN});
-assert.equal(new URL(erp.url).hostname,'dev-sr.butest.tech','This smoke test is restricted to dev');
+const devHosts = ['dev-sr.butest.tech','emission-stable-jackknife.ngrok-free.dev'];
+assert.ok(devHosts.includes(new URL(erp.url).hostname),'This smoke test is restricted to the approved dev ERP sites');
 await erp.method('frappe.auth.get_logged_user');
 console.log('PASS ERP authentication');
 const doctors = await erp.method('mobile_app.api.practitioners.list_doctors');
