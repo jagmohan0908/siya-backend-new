@@ -28,8 +28,46 @@ class FakeErp {
   }
 }
 const user = {id:'gid://shopify/Customer/1',name:'Test Account',email:'test@example.invalid',phone:'+919999999999'};
-const booking = {id:'11111111-1111-1111-1111-111111111111',doctorId:'Megha',appointmentDate:'2026-10-05',time:'10:00:00',timeSlot:'10:00 AM',consultationType:'opd',patientName:'Test Patient'};
+const booking = {id:'11111111-1111-1111-1111-111111111111',doctorId:'Megha',appointmentDate:'2026-10-05',time:'10:00:00',timeSlot:'10:00 AM',consultationType:'opd',patientName:'Test Patient',patientGender:'Female'};
 const setup = options => { const erp = new FakeErp(); return {erp,service:new MobileService({erp,doctorPolicy:{Megha:{enabled:true,fee:0,mode:'opd'}},...options})}; };
+
+test('new bookings require a selected gender before ERP writes or payment preparation',async()=>{
+  for(const patientGender of [undefined,'','unknown','male',123]) {
+    const {service,erp}=setup({webhookUrl:'https://webhook.test'});
+    await assert.rejects(service.createAppointment(user,{...booking,patientGender}),{code:'patient_gender_required'});
+    await assert.rejects(service.createAppointment(user,{...booking,patientGender},true),{code:'patient_gender_required'});
+    assert.equal(erp.created.length,0);
+  }
+});
+
+test('selected gender and configured department reach ERP storage and the n8n patient payload',async()=>{
+  let payload;
+  const {service,erp}=setup({webhookUrl:'https://webhook.test',fetcher:async(_,request)=>{
+    payload=JSON.parse(request.body);return Response.json({});
+  }});
+  const result=await service.createAppointment(user,{...booking,department:'untrusted'});
+  assert.equal(result.patientGender,'Female');assert.equal(result.department,'Skin/Fertility/Liver/IBS');
+  assert.equal(payload.patient.sex,'Female');assert.equal(payload.department,result.department);
+  const saved=await service.records.read(user.id,'appointment',booking.id);
+  assert.equal(saved.data.patientGender,'Female');
+  const reservation=await erp.get('Mobile App Appointment',result.reservation);
+  assert.equal(JSON.parse(reservation.payload_json).patientGender,'Female');
+  await assert.rejects(service.createAppointment(user,{...booking,patientGender:'Male'}),{code:'idempotency_conflict'});
+});
+
+test('older unsent payment reservations require gender and reuse the existing payment order',async()=>{
+  let orders=0;
+  const {service}=setup({webhookUrl:'https://webhook.test',payments:{keyId:'test',create:async()=>{orders++;return {id:'order_existing'};}}});
+  service.doctorPolicy.Megha.fee=1000;
+  await service.createAppointment(user,booking,true);
+  const record=await service.records.read(user.id,'appointment',booking.id);
+  const {patientGender,...legacy}=record.data;
+  await service.records.write(user.id,'appointment',booking.id,legacy,record.revision);
+  await assert.rejects(service.createAppointment(user,{...booking,patientGender:undefined},true),{code:'patient_gender_required'});
+  const order=await service.createAppointment(user,booking,true);
+  assert.equal(order.orderId,'order_existing');assert.equal(orders,1);
+  assert.equal((await service.records.read(user.id,'appointment',booking.id)).data.patientGender,'Female');
+});
 
 test('record ownership is part of the deterministic key',async () => {
   const {erp} = setup(); const records = new Records(erp);

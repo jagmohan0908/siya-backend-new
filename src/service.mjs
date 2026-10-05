@@ -7,6 +7,8 @@ const day = () => new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Kolkata', ye
 const statuses = {Pending: 'pending', Approved: 'confirmed', Confirmed: 'confirmed', 'Checked In': 'checked_in', Completed: 'completed', Cancelled: 'cancelled'};
 export const appointmentStatus = value => statuses[value] || 'pending';
 const cleanProfile = data => Object.fromEntries(['name','gender','dateOfBirth','height','weight'].filter(k => data[k] != null).map(k => [k, text(String(data[k]), 150)]));
+const patientGenders = new Set(['Male','Female','Other','Prefer not to say','Non-Conforming','Genderqueer','Transgender']);
+const appointmentDepartment = 'Skin/Fertility/Liver/IBS';
 
 export class MobileService {
   constructor({erp, webhookUrl, webhookSecret, fetcher = fetch, doctorPolicy = {}, rewardIssuer, payments,
@@ -102,13 +104,21 @@ export class MobileService {
   async createAppointment(user, body, prepare = false) {
     object(body); const id = text(body.id, 100);
     requireValue(/^[a-zA-Z0-9-]{16,100}$/.test(id), 'A stable booking ID is required');
-    const existing = await this.records.read(user.id, 'appointment', id);
+    let existing = await this.records.read(user.id, 'appointment', id);
     if (existing) {
       requireValue(existing.data.doctorId===body.doctorId && existing.data.appointmentDate===String(body.appointmentDate).slice(0,10)
-        && existing.data.time===body.time && existing.data.consultationType===body.consultationType && existing.data.patientName===body.patientName,
+        && existing.data.time===body.time && existing.data.consultationType===body.consultationType && existing.data.patientName===body.patientName
+        && (!existing.data.patientGender || existing.data.patientGender===body.patientGender),
         'This booking ID already belongs to another appointment. Start a new booking.',409,'idempotency_conflict');
+      if (existing.data.deliveryState === 'not_sent' && !existing.data.patientGender) {
+        requireValue(patientGenders.has(body.patientGender), 'Please select the patient gender before booking.',400,'patient_gender_required');
+        existing = await this.records.write(user.id,'appointment',id,{...existing.data,
+          patientGender:body.patientGender,department:appointmentDepartment},existing.revision);
+      }
       return prepare ? this.paymentOrder(user, existing) : this.deliverAppointment(user, existing, body.paymentId);
     }
+    const patientGender = body.patientGender;
+    requireValue(patientGenders.has(patientGender), 'Please select the patient gender before booking.',400,'patient_gender_required');
     const doctor = text(body.doctorId); const policy = this.doctorPolicy[doctor];
     requireValue(policy?.enabled, 'Doctor not available', 404);
     requireValue(policy.fee === 0 || this.payments?.keyId, 'Payments are temporarily unavailable. No payment was taken.', 503, 'payment_setup_required');
@@ -136,12 +146,14 @@ export class MobileService {
       appointment_external_id: reservationName, booking_id: id, mobile_app_user: identity.erpUser,
       practitioner_id: doctor, practitioner_schedule: slot.schedule_id, appointment_date: date, appointment_time: time,
       duration: slot.duration, status: 'Pending', consultation_type: mode, patient_name: patientName,
-      mobile_number: patientPhone, email: user.email, payload_json: JSON.stringify({source: 'siya-mobile-api', id}),
+      mobile_number: patientPhone, email: user.email,
+      payload_json: JSON.stringify({source: 'siya-mobile-api', id, patientGender, department: appointmentDepartment}),
     });
     const saved = {id, doctorId: doctor, doctorName: reservation.doctor_name || doctor,
       doctorImage: policy.imageUrl || '', specialization: '', appointmentDate: date, time,
       timeSlot: `${String(Number(time.slice(0,2)) % 12 || 12).padStart(2,'0')}:${time.slice(3,5)} ${Number(time.slice(0,2)) < 12 ? 'AM' : 'PM'}`,
       consultationType: mode, patientName, patientPhone, patientEmail: user.email,
+      patientGender, department: appointmentDepartment,
       symptoms: text(body.symptoms || '', 4000), consultationFee: policy.fee, status: 'pending',
       createdAt: new Date().toISOString(), paymentStatus: policy.fee === 0 ? 'free' : 'pending', paymentId: policy.fee === 0 ? `FREE-${id}` : null,
       reservation: reservationName, bookingSyncPending: true, deliveryState: 'not_sent'};
@@ -204,7 +216,8 @@ export class MobileService {
       const response = await this.fetcher(this.webhookUrl, {method: 'POST', headers: {'Content-Type': 'application/json',
         'Idempotency-Key': id, ...(this.webhookSecret ? {'X-Mobile-Webhook-Secret': this.webhookSecret} : {})},
         body: JSON.stringify({event: 'appointment.created', ...saved, fee: saved.consultationFee,
-          patient: {name: saved.patientName, phone: saved.patientPhone, email: user.email},
+          department: saved.department || appointmentDepartment,
+          patient: {name: saved.patientName, phone: saved.patientPhone, email: user.email, sex: saved.patientGender},
           erpMobileUser: identity.erpUser, erpReservation: saved.reservation, erpPatientId: identity.patient}),
         signal: AbortSignal.timeout(25000), redirect: 'error'});
       if (!response.ok) return record.data;
