@@ -59,16 +59,96 @@ test('invalid and expired Shopify tokens are rejected',async () => {
   const auth=createAuthenticator({domain:'test.myshopify.com',storefrontToken:'public',fetcher:async () => Response.json({data:{customer:null}})});
   await assert.rejects(auth('Bearer expired-token-123'),{status:401});
 });
-test('webhook timeout keeps a pending record and retry does not post twice',async () => {
+test('webhook timeout preserves a confirmed reservation and retry does not post twice',async () => {
   let calls=0; const {service,erp}=setup({webhookUrl:'https://webhook.test',fetcher:async () => {calls++;throw Error('timeout');}});
   const first=await service.createAppointment(user,booking);
   const second=await service.createAppointment(user,booking);
-  assert.equal(first.bookingSyncPending,true);assert.equal(second.id,first.id);assert.equal(calls,1);
+  assert.equal(first.bookingSyncPending,false);assert.equal(first.encounterSyncPending,true);assert.equal(first.status,'confirmed');
+  assert.equal((await erp.get('Mobile App Appointment',first.reservation)).status,'Confirmed');assert.equal(second.id,first.id);assert.equal(calls,1);
   assert.equal(erp.created.filter(d=>d.type==='Mobile App Appointment').length,1);
 });
 test('ERP Approved and Checked In remain distinct from clinical completion',() => {
   assert.equal(appointmentStatus('Approved'),'confirmed');assert.equal(appointmentStatus('Checked In'),'checked_in');
   assert.equal(appointmentStatus('Cancelled'),'cancelled');
+});
+
+test('failed ERP confirmation is not reported as success and does not send a webhook',async()=>{
+  let calls=0;
+  const {service,erp}=setup({webhookUrl:'https://webhook.test',fetcher:async()=>{calls++;return Response.json({});}});
+  const update=erp.update.bind(erp);
+  erp.update=async(type,name,fields)=>{
+    if(type==='Mobile App Appointment' && fields.status==='Confirmed') throw new ApiError(502,'erp_request_failed','Offline');
+    return update(type,name,fields);
+  };
+  await assert.rejects(service.createAppointment(user,booking),{status:502});
+  const saved=await service.records.read(user.id,'appointment',booking.id);
+  assert.equal(saved.data.status,'pending');assert.equal(saved.data.bookingSyncPending,true);assert.equal(calls,0);
+  erp.update=update;
+  assert.equal((await service.createAppointment(user,booking)).status,'confirmed');
+  assert.equal(erp.created.filter(d=>d.type==='Mobile App Appointment').length,1);
+  assert.equal(calls,1);
+});
+
+test('confirmation requires ERP readback, not just a successful update response',async()=>{
+  const {service,erp}=setup({webhookUrl:'https://webhook.test',fetcher:async()=>assert.fail('must not deliver')});
+  const update=erp.update.bind(erp);
+  erp.update=async(type,name,fields)=>type==='Mobile App Appointment'
+    ? {...await erp.get(type,name),...fields} : update(type,name,fields);
+  await assert.rejects(service.createAppointment(user,booking),{status:409});
+  assert.equal((await service.records.read(user.id,'appointment',booking.id)).data.bookingSyncPending,true);
+});
+
+test('paid reservations stay pending until the payment gateway verifies capture',async()=>{
+  let verified=false,calls=0;
+  const {service,erp}=setup({webhookUrl:'https://webhook.test',fetcher:async()=>{calls++;throw Error('timeout');},
+    payments:{keyId:'test',create:async()=>({id:'order_123'}),verify:async()=>{if(!verified)throw new ApiError(409,'unpaid','Not captured');}}});
+  service.doctorPolicy.Megha.fee=1000;
+  await service.createAppointment(user,booking,true);
+  let record=await service.records.read(user.id,'appointment',booking.id);
+  await assert.rejects(service.confirmReservation(user,record),{code:'payment_not_verified'});
+  await assert.rejects(service.createAppointment(user,{...booking,paymentId:'pay_test'}),{status:409});
+  assert.equal((await erp.get('Mobile App Appointment',record.data.reservation)).status,'Pending');assert.equal(calls,0);
+  verified=true;
+  const result=await service.createAppointment(user,{...booking,paymentId:'pay_test'});
+  assert.equal(result.paymentStatus,'paid');assert.equal(result.status,'confirmed');assert.equal(result.bookingSyncPending,false);
+  assert.equal((await erp.get('Mobile App Appointment',record.data.reservation)).status,'Confirmed');assert.equal(calls,1);
+});
+
+test('confirmation rejects foreign reservations, cancelled bookings and changed appointment times',async()=>{
+  const {service,erp}=setup({webhookUrl:'https://webhook.test',fetcher:async()=>{throw Error('timeout');}});
+  const first=await service.createAppointment(user,booking);
+  const record=await service.records.read(user.id,'appointment',booking.id);
+  await erp.update('Mobile App Appointment',first.reservation,{mobile_app_user:'another-account',status:'Pending'});
+  await assert.rejects(service.confirmReservation(user,record),{code:'unverified_reservation'});
+  const identity=await service.identity(user);
+  await erp.update('Mobile App Appointment',first.reservation,{mobile_app_user:identity.erpUser,status:'Cancelled'});
+  await assert.rejects(service.confirmReservation(user,record),{status:409});
+  assert.equal((await service.refreshAppointment(user,record)).status,'cancelled');
+  await erp.update('Mobile App Appointment',first.reservation,{status:'Pending',appointment_time:'12:00:00'});
+  await assert.rejects(service.confirmReservation(user,record),{status:409});
+});
+
+test('a pending Encounter cannot downgrade a confirmed booking and cancellation remains authoritative',async()=>{
+  const {service,erp}=setup({webhookUrl:'https://webhook.test'});
+  service.fetcher=async()=>Response.json({data:await erp.create('Patient Encounter',{
+    doctype:'Patient Encounter',patient:'test-patient',docstatus:0,sr_notes:`External appointment ID: ${booking.id}`,custom_appointment_status:'Pending'})});
+  const first=await service.createAppointment(user,booking);
+  assert.equal(first.status,'confirmed');assert.equal(first.encounterSyncPending,false);
+  assert.equal((await service.createAppointment(user,booking)).status,'confirmed');
+  await erp.update('Mobile App Appointment',first.reservation,{status:'Cancelled'});
+  assert.equal((await service.createAppointment(user,booking)).status,'cancelled');
+  assert.equal(erp.created.filter(d=>d.type==='Patient Encounter').length,1);
+});
+
+test('cancellation while the webhook runs is preserved when attaching the Encounter',async()=>{
+  const {service,erp}=setup({webhookUrl:'https://webhook.test'});
+  service.fetcher=async()=>{
+    const record=await service.records.read(user.id,'appointment',booking.id);
+    await erp.update('Mobile App Appointment',record.data.reservation,{status:'Cancelled'});
+    return Response.json({data:await erp.create('Patient Encounter',{
+      doctype:'Patient Encounter',patient:'test-patient',docstatus:0,sr_notes:`External appointment ID: ${booking.id}`,custom_appointment_status:'Pending'})});
+  };
+  assert.equal((await service.createAppointment(user,booking)).status,'cancelled');
 });
 test('forged free price cannot bypass the backend doctor fee',async () => {
   const {service}=setup();service.doctorPolicy.Megha.fee=1000;
@@ -130,7 +210,7 @@ test('cancellation requests cannot name another account appointment',async () =>
   await assert.rejects(service.appointmentChange({...user,id:'other'},booking.id,{action:'cancel',requestId:booking.id}),{status:404});
   const request=await service.appointmentChange(user,booking.id,{action:'cancel',requestId:booking.id});
   assert.equal(request.status,'Pending');
-  assert.equal((await service.records.read(user.id,'appointment',booking.id)).data.status,'pending');
+  assert.equal((await service.records.read(user.id,'appointment',booking.id)).data.status,'confirmed');
 });
 test('profile saves strip attempts to change account, patient, email or permissions',async () => {
   const {service}=setup();

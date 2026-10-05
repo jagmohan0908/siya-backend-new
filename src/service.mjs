@@ -157,12 +157,45 @@ export class MobileService {
     await this.records.write(user.id,'appointment',record.data.id,{...record.data,paymentOrderId:order.id},record.revision);
     return {orderId:order.id,keyId:this.payments.keyId,amount:record.data.consultationFee};
   }
+  async bookingReservation(user, data) {
+    const identity = await this.identity(user);
+    const reservation = await this.erp.get('Mobile App Appointment', data.reservation);
+    requireValue(reservation.mobile_app_user === identity.erpUser && reservation.practitioner_id === data.doctorId,
+      'Appointment reservation could not be verified',409,'unverified_reservation');
+    return reservation;
+  }
+  async confirmReservation(user, record) {
+    const data = record.data;
+    requireValue(data.consultationFee === 0 ? data.paymentStatus === 'free' : data.paymentStatus === 'paid',
+      'Payment must be verified before confirmation',409,'payment_not_verified');
+    let reservation = await this.bookingReservation(user, data);
+    requireValue(String(reservation.appointment_date).slice(0,10) === data.appointmentDate &&
+      String(reservation.appointment_time).slice(0,5) === data.time.slice(0,5),
+      'Appointment details changed. Refresh before confirming.',409);
+    requireValue(['Pending','Confirmed','Rescheduled'].includes(reservation.status),
+      'This appointment can no longer be confirmed.',409);
+    if (reservation.status === 'Pending') {
+      await this.erp.update('Mobile App Appointment', reservation.name, {status:'Confirmed',modified:reservation.modified});
+      reservation = await this.bookingReservation(user, data);
+    }
+    requireValue(['Confirmed','Rescheduled'].includes(reservation.status),'Clinic confirmation could not be verified',409);
+    return this.records.write(user.id,'appointment',data.id,{...data,status:'confirmed',bookingSyncPending:false,
+      encounterSyncPending:!data.erpEncounterId},record.revision);
+  }
+  encounterBookingStatus(encounter, data) {
+    const status = appointmentStatus(encounter.custom_appointment_status);
+    if (['cancelled','completed'].includes(data.status)) return data.status;
+    if (data.status === 'checked_in' && ['pending','confirmed'].includes(status)) return data.status;
+    // A new encounter starts Pending; it must not downgrade an already confirmed reservation.
+    return status === 'pending' && data.status === 'confirmed' ? 'confirmed' : status;
+  }
   async deliverAppointment(user, record, paymentId) {
     if (record.data.deliveryState !== 'not_sent') return this.refreshAppointment(user,record);
     if (record.data.consultationFee > 0) {
       await this.payments.verify(user,record.data,paymentId);
       record=await this.records.write(user.id,'appointment',record.data.id,{...record.data,paymentId,paymentStatus:'paid'},record.revision);
     }
+    record = await this.confirmReservation(user, record);
     const saved=record.data; const id=saved.id; const identity=await this.identity(user);
     // Persist intent before external delivery. Uncertain delivery is reconciled, never blindly replayed.
     record = await this.records.write(user.id, 'appointment', id, {...saved, deliveryState: 'sent'}, record.revision);
@@ -185,20 +218,36 @@ export class MobileService {
     const encounter = await this.erp.get('Patient Encounter', encounterId);
     // A webhook cannot attach another patient's arbitrary encounter to this account.
     requireValue(encounter.docstatus !== 2 && (encounter.sr_notes || '').includes(`External appointment ID: ${record.data.id}`), 'Appointment response could not be verified', 409);
-    const identity = await this.identity(user);
+    const reservation = await this.bookingReservation(user, record.data);
+    record = {...record,data:this.reservationBookingData(reservation,record.data)};
     const data = {...record.data, erpEncounterId: encounter.name, erpPatientId: encounter.patient,
-      erpAppointmentReference: encounter.encounter_reference, status: appointmentStatus(encounter.custom_appointment_status),
-      meetingLink: encounter.google_meet_link || null, bookingSyncPending: false, deliveryState: 'acknowledged'};
-    await this.erp.update('Mobile App Appointment', data.reservation, {patient_encounter: encounter.name});
+      erpAppointmentReference: encounter.encounter_reference, status: this.encounterBookingStatus(encounter, record.data),
+      meetingLink: encounter.google_meet_link || null, bookingSyncPending: false, encounterSyncPending: false, deliveryState: 'acknowledged'};
+    await this.erp.update('Mobile App Appointment', data.reservation, {patient_encounter: encounter.name,modified:reservation.modified});
     // Do not automatically grant access to a historical patient matched by phone inside n8n.
     // An existing explicit account->Patient mapping remains the authority for records/invoices.
     const saved = await this.records.write(user.id, 'appointment', data.id, data, record.revision);
     return saved.data;
   }
+  reservationBookingData(reservation, data) {
+    const status = appointmentStatus(reservation.status);
+    const paid = data.consultationFee === 0 ? data.paymentStatus === 'free' : data.paymentStatus === 'paid';
+    if (['Confirmed','Rescheduled','Cancelled','Completed','Checked In','No Show'].includes(reservation.status) &&
+        (paid || !['Confirmed','Rescheduled'].includes(reservation.status))) {
+      return {...data,
+        status:reservation.status === 'Rescheduled' ? 'confirmed' : reservation.status === 'No Show' ? 'cancelled' : status,
+        bookingSyncPending:false};
+    }
+    return data;
+  }
   async refreshAppointment(user, record) {
+    if (record.data.reservation) {
+      const reservation = await this.bookingReservation(user, record.data);
+      record = {...record,data:this.reservationBookingData(reservation,record.data)};
+    }
     if (record.data.erpEncounterId) {
       const enc = await this.erp.get('Patient Encounter', record.data.erpEncounterId);
-      return {...record.data, status: appointmentStatus(enc.custom_appointment_status), meetingLink: enc.google_meet_link || record.data.meetingLink};
+      return {...record.data, status: this.encounterBookingStatus(enc, record.data), meetingLink: enc.google_meet_link || record.data.meetingLink};
     }
     if (record.data.deliveryState === 'sent') {
       const matches = await this.erp.list('Patient Encounter', {sr_notes: ['like', `%External appointment ID: ${record.data.id}%`]}, ['name'], {limit: 2});

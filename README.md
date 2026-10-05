@@ -150,12 +150,20 @@ by merely configuring an API URL or webhook.
 
 The webhook receives the booking ID, stable ERP doctor ID, reservation reference,
 patient/contact information, fee, payment reference/status and consultation mode.
-It must return the saved Patient Encounter (single object or one-item array),
-retain `External appointment ID: <id>` in `sr_notes`, and persist the video Meet
-link in ERP's `google_meet_link`. The backend rereads that encounter before it
-marks the booking verified. Pending, Approved, Checked In and Cancelled are
-distinct states. The app's pending message remains “Our team will contact you
-soon for confirmation.”
+Free bookings are automatically confirmed after the Mobile App Appointment is
+saved and read back as Confirmed in Frappe. Paid bookings require verified payment
+capture first. A confirmed response includes `reservation`, `status: confirmed`,
+and `bookingSyncPending: false`; the app displays "Booking confirmed" and
+"Your appointment is confirmed. Our team will contact you soon."
+
+Encounter synchronization is separate (`encounterSyncPending: true` until linked).
+The webhook must return the saved Patient Encounter (single object or one-item
+array), retain `External appointment ID: <id>` in `sr_notes`, and persist the video
+Meet link in ERP's `google_meet_link`. The backend rereads that encounter before
+linking it. A newly created Pending encounter does not downgrade a confirmed
+reservation. Clinic cancellation, check-in and completion remain distinct states.
+A webhook timeout does not undo a confirmed reservation or trigger another POST.
+Failed or unverified Frappe saves still show verification pending in the app.
 
 Before enabling live appointment writes, finish these deployment checks:
 
