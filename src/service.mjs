@@ -228,10 +228,21 @@ export class MobileService {
     } catch { return record.data; }
   }
   async attachEncounter(user, record, encounterId) {
-    const encounter = await this.erp.get('Patient Encounter', encounterId);
+    let encounter = await this.erp.get('Patient Encounter', encounterId);
     // A webhook cannot attach another patient's arbitrary encounter to this account.
     requireValue(encounter.docstatus !== 2 && (encounter.sr_notes || '').includes(`External appointment ID: ${record.data.id}`), 'Appointment response could not be verified', 409);
     const reservation = await this.bookingReservation(user, record.data);
+    // A delayed n8n response must not leave a cancelled reservation active in the clinic.
+    if (reservation.status === 'Cancelled' || record.data.status === 'cancelled') {
+      requireValue(encounter.sr_encounter_type === 'Appointment' &&
+        (encounter.pe_practitioner || encounter.practitioner) === record.data.doctorId &&
+        (!record.data.erpPatientId || encounter.patient === record.data.erpPatientId) &&
+        (encounter.sr_notes || '').split(/\r?\n/).some(line=>line.trim() === `External appointment ID: ${record.data.id}`),
+        'Clinic appointment does not match this booking.',409,'unverified_encounter');
+      await this.cancelCalendarAppointment('Patient Encounter', encounter.name);
+      encounter = await this.erp.get('Patient Encounter', encounterId);
+      requireValue(encounter.custom_appointment_status === 'Cancelled', 'Clinic cancellation could not be verified',502,'cancellation_unverified');
+    }
     record = {...record,data:this.reservationBookingData(reservation,record.data)};
     const data = {...record.data, erpEncounterId: encounter.name, erpPatientId: encounter.patient,
       erpAppointmentReference: encounter.encounter_reference, status: this.encounterBookingStatus(encounter, record.data),
@@ -278,14 +289,95 @@ export class MobileService {
     const record = await this.records.read(user.id, 'appointment', id);
     requireValue(record, 'Appointment not found', 404);
     requireValue(['cancel','reschedule'].includes(body.action), 'Invalid appointment action');
-    // Requests go to the clinic; do not pretend the authoritative appointment changed.
     const requestId = text(body.requestId, 100);
+    requireValue(requestId, 'A request ID is required');
     const prior = await this.records.read(user.id, 'appointment_request', requestId);
+    if (prior) requireValue(prior.data.appointmentId === id && prior.data.action === body.action,
+      'This request ID belongs to another appointment change.',409,'idempotency_conflict');
+    if (body.action === 'cancel') {
+      if (prior?.data.status === 'Completed') return prior.data;
+      return this.cancelAppointment(user,record,requestId,prior);
+    }
+    // Rescheduling remains a clinic request.
     if (prior) return prior.data;
     const request = {id: requestId, appointmentId: id, action: body.action, date: body.date, time: body.time,
       status: 'Pending', createdAt: new Date().toISOString()};
     await this.records.write(user.id, 'appointment_request', requestId, request, 0);
     return request;
+  }
+  async cancellationState(doctype, name) {
+    const state = await this.erp.method('mobile_app.api.appointment_calendar.get_appointment',{doctype,name});
+    requireValue(state?.name === name && state.source_doctype === doctype,
+      'Clinic appointment could not be verified',502,'cancellation_unverified');
+    requireValue(state.status === 'Cancelled' ||
+      (['Pending','Approved'].includes(state.status) && state.actions?.includes('cancel')),
+      'This appointment can no longer be cancelled in the app. Please contact the clinic.',409,'cancellation_not_allowed');
+    return state;
+  }
+  async cancelCalendarAppointment(doctype, name, state) {
+    state ||= await this.cancellationState(doctype,name);
+    if (state.status !== 'Cancelled') {
+      await this.erp.method('mobile_app.api.appointment_calendar.update_appointment',{
+        doctype,name,action:'cancel',expected_status:state.status,reason:'Cancelled by the patient in the mobile app.',
+      },true);
+    }
+    const verified = await this.cancellationState(doctype,name);
+    requireValue(verified.status === 'Cancelled','Clinic cancellation could not be verified',502,'cancellation_unverified');
+  }
+  async cancelAppointment(user, record, requestId, prior) {
+    const data = record.data;
+    let reservation = await this.bookingReservation(user,data);
+    requireValue(reservation.booking_id === data.id, 'Appointment reservation could not be verified',409,'unverified_reservation');
+    requireValue(!['completed','checked_in'].includes(data.status) &&
+      ['Pending','Confirmed','Rescheduled','Cancelled'].includes(reservation.status),
+      'This appointment can no longer be cancelled in the app. Please contact the clinic.',409,'cancellation_not_allowed');
+    requireValue(!data.erpEncounterId || !reservation.patient_encounter || data.erpEncounterId === reservation.patient_encounter,
+      'The clinic appointment links need review. Please contact the clinic.',409,'unverified_encounter');
+    let encounterId = data.erpEncounterId || reservation.patient_encounter;
+    if (!encounterId) {
+      const matches = await this.erp.list('Patient Encounter',
+        {sr_notes:['like',`%External appointment ID: ${data.id}%`]},['name'],{limit:2});
+      requireValue(matches.length < 2,'Multiple clinic records match this booking. Please contact the clinic.',409,'ambiguous_encounter');
+      encounterId = matches[0]?.name;
+    }
+    let encounter;
+    if (encounterId) {
+      encounter = await this.erp.get('Patient Encounter',encounterId);
+      requireValue(encounter.sr_encounter_type === 'Appointment' &&
+        (encounter.sr_notes || '').split(/\r?\n/).some(line=>line.trim() === `External appointment ID: ${data.id}`) &&
+        (encounter.pe_practitioner || encounter.practitioner) === data.doctorId &&
+        (!data.erpPatientId || encounter.patient === data.erpPatientId),
+        'Clinic appointment does not match this booking. Please contact the clinic.',409,'unverified_encounter');
+    }
+    // Validate both states before making changes. ERP locks and expected_status guard races.
+    const reservationState = await this.cancellationState('Mobile App Appointment',reservation.name);
+    const encounterState = encounter && await this.cancellationState('Patient Encounter',encounter.name);
+    const request = prior || await this.records.write(user.id,'appointment_request',requestId,{
+      id:requestId,appointmentId:data.id,action:'cancel',status:'Processing',createdAt:new Date().toISOString(),
+    },0);
+    if (encounter) await this.cancelCalendarAppointment('Patient Encounter',encounter.name,encounterState);
+    await this.cancelCalendarAppointment('Mobile App Appointment',reservation.name,reservationState);
+    // The calendar workflow tracks decisions; the reservation status also controls slot capacity.
+    reservation = await this.bookingReservation(user,data);
+    if (reservation.status !== 'Cancelled') {
+      requireValue(['Pending','Confirmed','Rescheduled'].includes(reservation.status),
+        'This appointment changed. Please refresh and retry.',409);
+      await this.erp.update('Mobile App Appointment',reservation.name,{status:'Cancelled',modified:reservation.modified});
+    }
+    reservation = await this.bookingReservation(user,data);
+    requireValue(reservation.status === 'Cancelled','Reservation cancellation could not be verified',502,'cancellation_unverified');
+    if (encounter) {
+      encounter = await this.erp.get('Patient Encounter',encounter.name);
+      requireValue(encounter.custom_appointment_status === 'Cancelled','Clinic cancellation could not be verified',502,'cancellation_unverified');
+    }
+    const saved = await this.records.write(user.id,'appointment',data.id,{
+      ...data,status:'cancelled',bookingSyncPending:false,cancelledAt:data.cancelledAt || new Date().toISOString(),
+      ...(encounter ? {erpEncounterId:encounter.name,erpPatientId:encounter.patient,encounterSyncPending:false,deliveryState:'acknowledged'} : {}),
+    },record.revision);
+    const completed = await this.records.write(user.id,'appointment_request',requestId,{
+      ...request.data,status:'Completed',appointment:saved.data,
+    },request.revision);
+    return completed.data;
   }
   async treatment(user, body) {
     const id = text(body.id, 100); object(body.answers);

@@ -9,7 +9,7 @@ import {Razorpay} from '../src/payments.mjs';
 import {isPerfectDay} from '../src/habits.mjs';
 
 class FakeErp {
-  constructor() { this.docs = new Map(); this.created = []; this.url = 'https://erp.test'; }
+  constructor() { this.docs = new Map(); this.created = []; this.url = 'https://erp.test'; this.calendar = new Map(); this.cancelCalls = []; }
   async maybe(type,name) { return this.docs.get(`${type}/${name}`) || null; }
   async get(type,name) { const value = await this.maybe(type,name); if (!value) throw new ApiError(404,'not_found','Not found'); return structuredClone(value); }
   async create(type,doc) {
@@ -20,9 +20,27 @@ class FakeErp {
   async update(type,name,fields) { const result = {...await this.get(type,name),...structuredClone(fields)}; this.docs.set(`${type}/${name}`,result); return result; }
   async list(type,filters,fields,options) {
     return [...this.docs.entries()].filter(([key]) => key.startsWith(`${type}/`)).map(([,doc]) => structuredClone(doc)).filter(doc =>
-      Object.entries(filters || {}).every(([key,value]) => Array.isArray(value) ? value[0] === 'in' ? value[1].includes(doc[key]) : true : doc[key] === value));
+      Object.entries(filters || {}).every(([key,value]) => Array.isArray(value) ? value[0] === 'in' ? value[1].includes(doc[key]) : value[0] === 'like' ? String(doc[key] || '').includes(value[1].replace(/^%|%$/g,'')) : true : doc[key] === value));
   }
-  async method(name) {
+  async method(name,args,write) {
+    if (name.endsWith('.get_appointment')) {
+      const doc=await this.get(args.doctype,args.name);
+      const status=doc.status==='Cancelled' ? 'Cancelled' : this.calendar.get(`${args.doctype}/${args.name}`) ||
+        (args.doctype==='Patient Encounter' ? doc.custom_appointment_status : 'Pending');
+      return {name:args.name,source_doctype:args.doctype,status,actions:['Pending','Approved'].includes(status)?['cancel']:[]};
+    }
+    if (name.endsWith('.update_appointment')) {
+      assert.equal(write,true);assert.equal(args.action,'cancel');assert.ok(args.reason);
+      const before=await this.method('test.get_appointment',args);
+      if (before.status!==args.expected_status) throw new ApiError(409,'revision_conflict','Changed');
+      assert.ok(before.actions.includes('cancel'));
+      this.cancelCalls.push({...args});this.calendar.set(`${args.doctype}/${args.name}`,'Cancelled');
+      if(args.doctype==='Patient Encounter') {
+        const enc=await this.update(args.doctype,args.name,{custom_appointment_status:'Cancelled'});
+        if(enc.encounter_reference) await this.update('Clinic Appointment',enc.encounter_reference,{appointment_status:'Cancelled'});
+      }
+      return this.method('test.get_appointment',args);
+    }
     if (name.endsWith('.availability')) return {slots:[{time:'10:00:00',duration:10,remaining:1,schedule_id:'schedule'}],timezone:'Asia/Kolkata'};
     if (name.endsWith('.list_doctors')) return {doctors:[{id:'Megha',name:'Megha',specialty:'Skin',tags:[],schedules:[{days:['Monday']}],is_active:true}],timezone:'Asia/Kolkata'};
   }
@@ -169,7 +187,7 @@ test('confirmation rejects foreign reservations, cancelled bookings and changed 
 test('a pending Encounter cannot downgrade a confirmed booking and cancellation remains authoritative',async()=>{
   const {service,erp}=setup({webhookUrl:'https://webhook.test'});
   service.fetcher=async()=>Response.json({data:await erp.create('Patient Encounter',{
-    doctype:'Patient Encounter',patient:'test-patient',docstatus:0,sr_notes:`External appointment ID: ${booking.id}`,custom_appointment_status:'Pending'})});
+    doctype:'Patient Encounter',sr_encounter_type:'Appointment',pe_practitioner:'Megha',patient:'test-patient',docstatus:0,sr_notes:`External appointment ID: ${booking.id}`,custom_appointment_status:'Pending'})});
   const first=await service.createAppointment(user,booking);
   assert.equal(first.status,'confirmed');assert.equal(first.encounterSyncPending,false);
   assert.equal((await service.createAppointment(user,booking)).status,'confirmed');
@@ -184,7 +202,7 @@ test('cancellation while the webhook runs is preserved when attaching the Encoun
     const record=await service.records.read(user.id,'appointment',booking.id);
     await erp.update('Mobile App Appointment',record.data.reservation,{status:'Cancelled'});
     return Response.json({data:await erp.create('Patient Encounter',{
-      doctype:'Patient Encounter',patient:'test-patient',docstatus:0,sr_notes:`External appointment ID: ${booking.id}`,custom_appointment_status:'Pending'})});
+      doctype:'Patient Encounter',sr_encounter_type:'Appointment',pe_practitioner:'Megha',patient:'test-patient',docstatus:0,sr_notes:`External appointment ID: ${booking.id}`,custom_appointment_status:'Pending'})});
   };
   assert.equal((await service.createAppointment(user,booking)).status,'cancelled');
 });
@@ -242,13 +260,109 @@ test('a verified webhook encounter is returned with the ERP meeting link and sta
   assert.equal(second.erpEncounterId,result.erpEncounterId);
   assert.equal(erp.created.filter(row=>row.type==='Patient Encounter').length,1);
 });
-test('cancellation requests cannot name another account appointment',async () => {
+test('cancellation verifies ownership and cancels the ERP reservation',async () => {
   const {service}=setup({webhookUrl:'https://webhook.test',fetcher:async()=>{throw Error('offline')}});
   await service.createAppointment(user,booking);
   await assert.rejects(service.appointmentChange({...user,id:'other'},booking.id,{action:'cancel',requestId:booking.id}),{status:404});
   const request=await service.appointmentChange(user,booking.id,{action:'cancel',requestId:booking.id});
-  assert.equal(request.status,'Pending');
+  assert.equal(request.status,'Completed');assert.equal(request.appointment.status,'cancelled');
+  assert.equal((await service.records.read(user.id,'appointment',booking.id)).data.status,'cancelled');
+});
+
+async function bookingWithClinic() {
+  const {erp,service}=setup({webhookUrl:'https://webhook.test'});
+  service.fetcher=async()=>{
+    let enc=await erp.create('Patient Encounter',{doctype:'Patient Encounter',sr_encounter_type:'Appointment',
+      pe_practitioner:booking.doctorId,patient:'patient-test',docstatus:0,custom_appointment_status:'Pending',
+      sr_notes:`External appointment ID: ${booking.id}`});
+    const clinic=await erp.create('Clinic Appointment',{encounter_reference:enc.name,appointment_status:'Confirmed'});
+    enc=await erp.update('Patient Encounter',enc.name,{encounter_reference:clinic.name});
+    return Response.json({data:enc});
+  };
+  const appointment=await service.createAppointment(user,booking);
+  return {erp,service,appointment};
+}
+
+test('cancellation updates encounter, clinic, reservation and history, with safe retries',async()=>{
+  const {erp,service,appointment}=await bookingWithClinic();
+  const body={action:'cancel',requestId:'cancel-test'};
+  const result=await service.appointmentChange(user,booking.id,body);
+  assert.equal(result.status,'Completed');assert.equal(result.appointment.bookingSyncPending,false);
+  assert.equal((await erp.get('Mobile App Appointment',appointment.reservation)).status,'Cancelled');
+  assert.equal((await erp.get('Patient Encounter',appointment.erpEncounterId)).custom_appointment_status,'Cancelled');
+  assert.equal((await erp.get('Clinic Appointment',appointment.erpAppointmentReference)).appointment_status,'Cancelled');
+  assert.equal((await service.appointments(user)).items[0].status,'cancelled');
+  const calls=erp.cancelCalls.length;
+  await service.appointmentChange(user,booking.id,body);
+  await service.appointmentChange(user,booking.id,{...body,requestId:'another-retry'});
+  assert.equal(erp.cancelCalls.length,calls);
+  assert.equal(erp.created.filter(d=>d.type==='Patient Encounter').length,1);
+});
+
+test('cancellation cannot reuse a request for another action or change an unrelated encounter',async()=>{
+  const {erp,service,appointment}=await bookingWithClinic();
+  await service.appointmentChange(user,booking.id,{action:'reschedule',requestId:'same-request'});
+  await assert.rejects(service.appointmentChange(user,booking.id,{action:'cancel',requestId:'same-request'}),{code:'idempotency_conflict'});
+  await erp.update('Patient Encounter',appointment.erpEncounterId,{sr_notes:`External appointment ID: ${booking.id}-another`});
+  await assert.rejects(service.appointmentChange(user,booking.id,{action:'cancel',requestId:'new-request'}),{code:'unverified_encounter'});
+  assert.equal(erp.cancelCalls.length,0);
+});
+
+test('checked-in appointments and ERP failures never produce a completed cancellation',async()=>{
+  const {erp,service,appointment}=await bookingWithClinic();
+  await erp.update('Patient Encounter',appointment.erpEncounterId,{custom_appointment_status:'Checked In'});
+  await assert.rejects(service.appointmentChange(user,booking.id,{action:'cancel',requestId:'cannot-cancel'}),{code:'cancellation_not_allowed'});
+  assert.equal((await erp.get('Mobile App Appointment',appointment.reservation)).status,'Confirmed');
+  assert.equal(erp.cancelCalls.length,0);
+  await erp.update('Patient Encounter',appointment.erpEncounterId,{custom_appointment_status:'Pending'});
+  const method=erp.method.bind(erp);
+  erp.method=async(name,...args)=>{
+    if(name.endsWith('.update_appointment'))throw new ApiError(502,'erp_request_failed','Unavailable');
+    return method(name,...args);
+  };
+  await assert.rejects(service.appointmentChange(user,booking.id,{action:'cancel',requestId:'failed-cancel'}),{status:502});
   assert.equal((await service.records.read(user.id,'appointment',booking.id)).data.status,'confirmed');
+  assert.equal((await service.records.read(user.id,'appointment_request','failed-cancel')).data.status,'Processing');
+});
+
+test('partial ERP cancellation resumes without repeating a completed clinic transition',async()=>{
+  const {erp,service,appointment}=await bookingWithClinic();
+  const update=erp.update.bind(erp);
+  erp.update=async(type,name,fields)=>{
+    if(type==='Mobile App Appointment' && fields.status==='Cancelled') throw new ApiError(502,'erp_request_failed','Unavailable');
+    return update(type,name,fields);
+  };
+  const body={action:'cancel',requestId:'retry-partial'};
+  await assert.rejects(service.appointmentChange(user,booking.id,body),{status:502});
+  assert.equal((await erp.get('Patient Encounter',appointment.erpEncounterId)).custom_appointment_status,'Cancelled');
+  erp.update=update;
+  const result=await service.appointmentChange(user,booking.id,body);
+  assert.equal(result.appointment.status,'cancelled');
+  assert.equal(erp.cancelCalls.filter(c=>c.doctype==='Patient Encounter').length,1);
+});
+
+test('a successful HTTP response without a saved ERP cancellation is rejected',async()=>{
+  const {erp,service,appointment}=await bookingWithClinic();
+  const method=erp.method.bind(erp);
+  erp.method=async(name,...args)=> name.endsWith('.update_appointment')
+    ? {status:'Cancelled'} : method(name,...args);
+  await assert.rejects(service.appointmentChange(user,booking.id,
+    {action:'cancel',requestId:'unverified-cancel'}),{code:'cancellation_unverified'});
+  assert.equal((await erp.get('Mobile App Appointment',appointment.reservation)).status,'Confirmed');
+  assert.equal((await service.records.read(user.id,'appointment',booking.id)).data.status,'confirmed');
+});
+
+test('an encounter arriving after cancellation is cancelled during reconciliation',async()=>{
+  const {erp,service}=setup({webhookUrl:'https://webhook.test',fetcher:async()=>{throw Error('timeout');}});
+  await service.createAppointment(user,booking);
+  await service.appointmentChange(user,booking.id,{action:'cancel',requestId:'cancel-before-encounter'});
+  const enc=await erp.create('Patient Encounter',{doctype:'Patient Encounter',sr_encounter_type:'Appointment',
+    pe_practitioner:booking.doctorId,patient:'patient-test',docstatus:0,custom_appointment_status:'Pending',
+    sr_notes:`External appointment ID: ${booking.id}`});
+  const history=await service.appointments(user);
+  assert.equal(history.items[0].status,'cancelled');
+  assert.equal(history.items[0].erpEncounterId,enc.name);
+  assert.equal((await erp.get('Patient Encounter',enc.name)).custom_appointment_status,'Cancelled');
 });
 test('profile saves strip attempts to change account, patient, email or permissions',async () => {
   const {service}=setup();

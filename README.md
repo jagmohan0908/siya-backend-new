@@ -99,7 +99,7 @@ Shopify Admin credentials in Dart defines or the APK.
 | `GET /v1/profile`, `PUT /v1/profile` | Customer-scoped profile with optimistic revision checks |
 | `POST /v1/appointment-orders` | Reserve a slot, persist the booking, create a server-priced Razorpay order |
 | `POST /v1/appointments`, `GET /v1/appointments` | Create/reconcile bookings and retrieve current ERP status/Meet link |
-| `POST /v1/appointments/:id/requests` | Store cancellation/reschedule requests for clinic review; does not claim the schedule already changed |
+| `POST /v1/appointments/:id/requests` | Cancel in ERP with verified readback; rescheduling remains a clinic review request |
 | `GET /v1/diets` | Diet charts assigned through the linked patient's encounters |
 | `POST /v1/treatments`, `GET /v1/treatments` | Versioned questionnaire, answers, result text and attachment references |
 | `GET /v1/habits`, `PUT /v1/habits` | ERP tracker persistence; today's entries, server-calculated streak, revision conflicts |
@@ -176,8 +176,13 @@ Before enabling live appointment writes, finish these deployment checks:
   of releasing a potentially paid appointment or charging again.
 - Confirm the n8n workflow uses stable ERP doctor IDs, preserves reservation links,
   creates a video link once, and can reconcile a response lost after commit.
-- Have the clinic process `appointment_request` records. Cancellation/rescheduling
-  currently creates a request, not an automatic clinical workflow transition.
+- Cancellation uses `mobile_app.api.appointment_calendar` to cancel the owned
+  reservation and matching Patient Encounter, including its linked Clinic Appointment.
+  The integration account needs permission to cancel through that API. Successful
+  responses have `status: Completed` and the verified cancelled `appointment`;
+  failed/partial operations can be retried with the same request ID. Late encounters
+  are cancelled during history reconciliation. Payment refunds are not automated.
+- Have the clinic process pending reschedule `appointment_request` records.
 
 ## Habit rewards
 
