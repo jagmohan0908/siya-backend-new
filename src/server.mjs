@@ -1,6 +1,5 @@
 import {createServer} from 'node:http';
 import {pathToFileURL} from 'node:url';
-import {readFile} from 'node:fs/promises';
 import {Erp} from './erp.mjs';
 import {createAuthenticator} from './auth.mjs';
 import {MobileService} from './service.mjs';
@@ -38,6 +37,7 @@ export function createApi({service, authenticate, origins = [], allowBookings = 
       let result;
       if (req.method === 'GET' && url.pathname === '/health') result = {ok:true,version:1};
       else if (req.method === 'GET' && url.pathname === '/v1/doctors') result = await service.doctors();
+      else if (req.method === 'GET' && parts.length === 4 && parts[0] === 'v1' && parts[1] === 'doctors' && parts[3] === 'photo') result = await service.doctorPhoto(parts[2]);
       else if (req.method === 'GET' && url.pathname === '/v1/review-avatars') result = await service.reviewAvatars();
       else if (req.method === 'GET' && parts[0] === 'v1' && parts[1] === 'doctors' && parts[3] === 'slots') {
         result = await service.availability(parts[2],url.searchParams.get('date') || '');
@@ -71,7 +71,7 @@ export function createApi({service, authenticate, origins = [], allowBookings = 
         });
       }
       if (result instanceof Response) {
-        res.setHeader('Content-Type','application/pdf');
+        res.setHeader('Content-Type',parts[3] === 'photo' ? result.headers.get('content-type') : 'application/pdf');
         res.end(Buffer.from(await result.arrayBuffer())); return;
       }
       res.setHeader('Content-Type','application/json'); res.end(JSON.stringify(result));
@@ -91,8 +91,7 @@ export function createApi({service, authenticate, origins = [], allowBookings = 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   requireValue(process.env.ERP_URL?.startsWith('https://') && process.env.ERP_TOKEN,'Configure ERP_URL and ERP_TOKEN');
   const erp = new Erp({url:process.env.ERP_URL,token:process.env.ERP_TOKEN});
-  const doctorPolicy = JSON.parse(await readFile(new URL('../doctor-policy.json',import.meta.url),'utf8'));
-  const service = new MobileService({erp,doctorPolicy,webhookUrl:process.env.APPOINTMENT_WEBHOOK_URL,
+  const service = new MobileService({erp,webhookUrl:process.env.APPOINTMENT_WEBHOOK_URL,
     s3PresignMethod:process.env.S3_PRESIGN_METHOD,
     payments:new Razorpay({keyId:process.env.RAZORPAY_KEY_ID,keySecret:process.env.RAZORPAY_KEY_SECRET}),
     webhookSecret:process.env.APPOINTMENT_WEBHOOK_SECRET,rewardIssuer:createRewardIssuer({domain:process.env.SHOPIFY_DOMAIN,adminToken:process.env.SHOPIFY_ADMIN_TOKEN})});

@@ -9,7 +9,7 @@ import {Razorpay} from '../src/payments.mjs';
 import {isPerfectDay} from '../src/habits.mjs';
 
 class FakeErp {
-  constructor() { this.docs = new Map(); this.created = []; this.url = 'https://erp.test'; this.calendar = new Map(); this.cancelCalls = []; }
+  constructor() { this.docs = new Map([['Healthcare Practitioner/Megha',{name:'Megha',practitioner_name:'Megha',status:'Active',op_consulting_charge:0,custom_accept_online_appointments:0}]]); this.created = []; this.url = 'https://erp.test'; this.calendar = new Map(); this.cancelCalls = []; }
   async maybe(type,name) { return this.docs.get(`${type}/${name}`) || null; }
   async get(type,name) { const value = await this.maybe(type,name); if (!value) throw new ApiError(404,'not_found','Not found'); return structuredClone(value); }
   async create(type,doc) {
@@ -42,12 +42,12 @@ class FakeErp {
       return this.method('test.get_appointment',args);
     }
     if (name.endsWith('.availability')) return {slots:[{time:'10:00:00',duration:10,remaining:1,schedule_id:'schedule'}],timezone:'Asia/Kolkata'};
-    if (name.endsWith('.list_doctors')) return {doctors:[{id:'Megha',name:'Megha',specialty:'Skin',tags:[],schedules:[{days:['Monday']}],is_active:true}],timezone:'Asia/Kolkata'};
+    if (name.endsWith('.list_doctors')) return {doctors:[...this.docs.entries()].filter(([k,d])=>k.startsWith('Healthcare Practitioner/') && d.status==='Active').map(([,d])=>({id:d.name,schedules:[{days:['Monday','Saturday']}]})),timezone:'Asia/Kolkata'};
   }
 }
 const user = {id:'gid://shopify/Customer/1',name:'Test Account',email:'test@example.invalid',phone:'+919999999999'};
 const booking = {id:'11111111-1111-1111-1111-111111111111',doctorId:'Megha',appointmentDate:'2026-10-05',time:'10:00:00',timeSlot:'10:00 AM',consultationType:'opd',patientName:'Test Patient',patientGender:'Female'};
-const setup = options => { const erp = new FakeErp(); return {erp,service:new MobileService({erp,doctorPolicy:{Megha:{enabled:true,fee:0,mode:'opd'}},...options})}; };
+const setup = options => { const erp = new FakeErp(); return {erp,service:new MobileService({erp,...options})}; };
 
 test('new bookings require a selected gender before ERP writes or payment preparation',async()=>{
   for(const patientGender of [undefined,'','unknown','male',123]) {
@@ -76,7 +76,7 @@ test('selected gender and configured department reach ERP storage and the n8n pa
 test('older unsent payment reservations require gender and reuse the existing payment order',async()=>{
   let orders=0;
   const {service}=setup({webhookUrl:'https://webhook.test',payments:{keyId:'test',create:async()=>{orders++;return {id:'order_existing'};}}});
-  service.doctorPolicy.Megha.fee=1000;
+  await service.erp.update('Healthcare Practitioner','Megha',{op_consulting_charge:1000});
   await service.createAppointment(user,booking,true);
   const record=await service.records.read(user.id,'appointment',booking.id);
   const {patientGender,...legacy}=record.data;
@@ -158,7 +158,7 @@ test('paid reservations stay pending until the payment gateway verifies capture'
   let verified=false,calls=0;
   const {service,erp}=setup({webhookUrl:'https://webhook.test',fetcher:async()=>{calls++;throw Error('timeout');},
     payments:{keyId:'test',create:async()=>({id:'order_123'}),verify:async()=>{if(!verified)throw new ApiError(409,'unpaid','Not captured');}}});
-  service.doctorPolicy.Megha.fee=1000;
+  await service.erp.update('Healthcare Practitioner','Megha',{op_consulting_charge:1000});
   await service.createAppointment(user,booking,true);
   let record=await service.records.read(user.id,'appointment',booking.id);
   await assert.rejects(service.confirmReservation(user,record),{code:'payment_not_verified'});
@@ -207,8 +207,8 @@ test('cancellation while the webhook runs is preserved when attaching the Encoun
   assert.equal((await service.createAppointment(user,booking)).status,'cancelled');
 });
 test('forged free price cannot bypass the backend doctor fee',async () => {
-  const {service}=setup();service.doctorPolicy.Megha.fee=1000;
-  await assert.rejects(service.createAppointment(user,{...booking,consultationFee:0,paymentStatus:'free'}),{status:503});
+  const {service}=setup();await service.erp.update('Healthcare Practitioner','Megha',{op_consulting_charge:1000});
+  await assert.rejects(service.createAppointment(user,{...booking,consultationFee:0,paymentStatus:'free'}),{code:'doctor_fee_changed'});
 });
 test('a legacy clinic booking removes that slot',async () => {
   const {erp,service}=setup();await erp.create('Clinic Appointment',{practitioner:'Megha',appointment_date:booking.appointmentDate,appointment_time:'10:00:00'});
@@ -394,7 +394,7 @@ test('Razorpay verification checks capture, amount, order and customer ownership
 test('paid preparation reserves once and retries return the same order',async () => {
   let created=0;
   const {service,erp}=setup({webhookUrl:'https://webhook.test',payments:{keyId:'test',create:async()=>{created++;return {id:'order_123'}}}});
-  service.doctorPolicy.Megha.fee=1000;
+  await service.erp.update('Healthcare Practitioner','Megha',{op_consulting_charge:1000});
   const first=await service.createAppointment(user,booking,true);
   const second=await service.createAppointment(user,booking,true);
   assert.equal(first.orderId,second.orderId);assert.equal(created,1);
@@ -506,4 +506,74 @@ test('a committed upload with a lost response is reconciled without another POST
   const uploaded=await service.upload(user,photo);
   assert.equal(posts,1);
   assert.equal((await service.profile(user)).data.imageFileId,uploaded.fileId);
+});
+
+
+test('ERP controls practitioner details, diseases, charges and online eligibility without an app allowlist',async()=>{
+  const {erp,service}=setup();
+  await erp.update('Healthcare Practitioner','Megha',{practitioner_name:'Updated ERP name',sr_qualification:'BHMS',
+    sr_diseases:[{disease:'Skin Allergy'},{disease:'Fatty Liver Disease'}],op_consulting_charge:1000.50,
+    custom_about_doctor:'Updated biography',custom_accept_online_appointments:0,image:'/files/doctor.jpg',modified:'v1'});
+  let doctor=(await service.doctors()).doctors[0];
+  assert.equal(doctor.name,'Updated ERP name');assert.equal(doctor.qualification,'BHMS');
+  assert.deepEqual(doctor.expertise,['Skin Allergy','Fatty Liver Disease']);
+  assert.equal(doctor.about,'Updated biography');assert.equal(doctor.consultationFee,1000.5);
+  assert.equal(doctor.isFreeConsultation,false);assert.equal(doctor.availableConsultationType,'opd');
+  assert.deepEqual(doctor.availableDays,['Mon','Sat']);assert.match(doctor.imageUrl,/photo\?v=v1$/);
+  await erp.update('Healthcare Practitioner','Megha',{custom_accept_online_appointments:1,image:'',op_consulting_charge:0});
+  doctor=(await service.doctors()).doctors[0];
+  assert.equal(doctor.availableConsultationType,'all');assert.equal(doctor.imageUrl,'');assert.equal(doctor.isFreeConsultation,true);
+  const extra=await erp.create('Healthcare Practitioner',{practitioner_name:'New doctor',status:'Active',op_consulting_charge:250});
+  assert.ok((await service.doctors()).doctors.some(d=>d.id===extra.name));
+  await erp.update('Healthcare Practitioner','Megha',{status:'Inactive'});
+  assert.ok(!(await service.doctors()).doctors.some(d=>d.id==='Megha'));
+  await assert.rejects(service.availability('Megha',booking.appointmentDate),{status:404});
+});
+
+test('online opt-out blocks video and audio before reservations; opt-in allows video',async()=>{
+  const {erp,service}=setup({webhookUrl:'https://webhook.test',fetcher:async()=>Response.json({})});
+  for(const consultationType of ['video','audio']) {
+    await assert.rejects(service.createAppointment(user,{...booking,consultationType}),{status:400});
+  }
+  assert.equal(erp.created.length,0);
+  await erp.update('Healthcare Practitioner','Megha',{custom_accept_online_appointments:1});
+  const saved=await service.createAppointment(user,{...booking,consultationType:'video'});
+  assert.equal(saved.consultationType,'video');
+});
+
+test('missing or invalid ERP charges never become free appointments',async()=>{
+  for(const fee of [null,undefined,'','invalid',-1]) {
+    const {erp,service}=setup();
+    await erp.update('Healthcare Practitioner','Megha',{op_consulting_charge:fee});
+    await assert.rejects(service.createAppointment(user,booking),{code:'doctor_fee_unavailable'});
+    assert.equal(erp.created.length,0);
+  }
+});
+
+test('current ERP fee wins over a stale client quote and supports fractional rupees',async()=>{
+  let charge;
+  const {erp,service}=setup({webhookUrl:'https://webhook.test',payments:{keyId:'test',create:async(_,a)=>{charge=a.consultationFee;return {id:'test-order'};}}});
+  await erp.update('Healthcare Practitioner','Megha',{op_consulting_charge:1000.5});
+  await assert.rejects(service.createAppointment(user,{...booking,consultationFee:0},true),{code:'doctor_fee_changed'});
+  assert.equal(erp.created.length,0);
+  const prepared=await service.createAppointment(user,{...booking,consultationFee:1000.5},true);
+  assert.equal(charge,1000.5);assert.equal(prepared.amount,1000.5);
+});
+
+test('doctor photos serve only the selected practitioner attachment and reject non-image content',async()=>{
+  const {erp,service}=setup();
+  await erp.update('Healthcare Practitioner','Megha',{image:'/files/doctor.jpg'});
+  await erp.create('File',{attached_to_doctype:'Mobile App User',attached_to_name:'other',file_url:'/files/doctor.jpg'});
+  await assert.rejects(service.doctorPhoto('Megha'),{status:404});
+  await erp.create('File',{attached_to_doctype:'Healthcare Practitioner',attached_to_name:'Megha',file_url:'/files/doctor.jpg'});
+  let contentType='image/jpeg';
+  erp.request=async(path,options)=>{
+    assert.equal(options.raw,true);assert.match(path,/download_file/);
+    return new Response(new Uint8Array([255,216,255]),{headers:{'Content-Type':contentType}});
+  };
+  assert.equal((await service.doctorPhoto('Megha')).headers.get('content-type'),'image/jpeg');
+  contentType='text/html';
+  await assert.rejects(service.doctorPhoto('Megha'),{status:404});
+  await erp.update('Healthcare Practitioner','Megha',{image:''});
+  await assert.rejects(service.doctorPhoto('Megha'),{status:404});
 });

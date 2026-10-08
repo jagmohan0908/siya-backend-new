@@ -93,7 +93,7 @@ Shopify Admin credentials in Dart defines or the APK.
 | Route | Behavior |
 | --- | --- |
 | `GET /health` | Process health; not a claim that all integrations are ready |
-| `GET /v1/doctors` | ERP doctors and schedule days, filtered by `doctor-policy.json`; Megha fee remains 0 |
+| `GET /v1/doctors` | ERP practitioner profiles, charges, online eligibility, diseases and schedule days |
 | `GET /v1/doctors/:id/slots?date=YYYY-MM-DD` | ERP capacity plus conservative filtering of existing Clinic Appointments |
 | `GET /v1/review-avatars` | Signed URLs for the fixed, public Indian illustration asset records |
 | `GET /v1/profile`, `PUT /v1/profile` | Customer-scoped profile with optimistic revision checks |
@@ -287,3 +287,15 @@ these records. Point n8n's ERP connection at the same database before enabling b
 For ngrok hosts, API, upload and PDF requests send the documented
 [`ngrok-skip-browser-warning` header](https://ngrok.com/abuse#browser-warning).
 ERP authentication remains required.
+
+
+Doctor details and charges are read from Healthcare Practitioner records on each
+refresh and before new bookings. `op_consulting_charge` applies to consultations;
+`custom_accept_online_appointments` enables video/audio, otherwise only OPD is
+available. Active practitioners with ERP schedules/exceptions appear automatically.
+No static doctor price or mode policy is used. Existing paid bookings retain their
+saved quote. The app retains its statistics and reviews for existing doctors.
+
+`GET /v1/doctors/:id/photo` serves only the selected image attached to that
+practitioner, via authenticated ERP download. Local ERP images and S3 images are
+supported by this doctor-photo route; patient profile storage is unchanged.

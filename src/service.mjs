@@ -11,9 +11,9 @@ const patientGenders = new Set(['Male','Female','Other','Prefer not to say','Non
 const appointmentDepartment = 'Skin/Fertility/Liver/IBS';
 
 export class MobileService {
-  constructor({erp, webhookUrl, webhookSecret, fetcher = fetch, doctorPolicy = {}, rewardIssuer, payments,
+  constructor({erp, webhookUrl, webhookSecret, fetcher = fetch, rewardIssuer, payments,
     s3PresignMethod = 'sriaas_clinic.api.s3.presign.get_presigned_url'}) {
-    Object.assign(this, {erp, webhookUrl, webhookSecret, fetcher, doctorPolicy, rewardIssuer, payments, s3PresignMethod});
+    Object.assign(this, {erp, webhookUrl, webhookSecret, fetcher, rewardIssuer, payments, s3PresignMethod});
     this.records = new Records(erp); this.queue = new SerialQueue();
   }
   async identity(user) {
@@ -64,17 +64,51 @@ export class MobileService {
     await this.erp.update('Mobile App User', identity.erpUser, {full_name: fields.name});
     return saved;
   }
+  async doctorDetails(row) {
+    const doc = await this.erp.get('Healthcare Practitioner', row.id);
+    requireValue(doc.status === 'Active', 'Doctor not available',404);
+    const fee = doc.op_consulting_charge;
+    requireValue(fee !== null && fee !== undefined && fee !== '' && Number.isFinite(Number(fee)) && Number(fee) >= 0,
+      'The clinic needs to configure this doctor\'s consultation charge.',503,'doctor_fee_unavailable');
+    const qualification = doc.sr_qualification || '';
+    return {id:doc.name, name:doc.practitioner_name || doc.name,
+      specialization:qualification || doc.department || '', qualification,
+      imageUrl:doc.image ? `/v1/doctors/${encodeURIComponent(doc.name)}/photo?v=${encodeURIComponent(doc.modified || doc.image)}` : '',
+      consultationFee:Math.round(Number(fee)*100)/100, isFreeConsultation:Number(fee) === 0,
+      about:doc.custom_about_doctor || '', isAvailable:true,
+      availableDays:[...new Set((row.schedules || []).flatMap(s=>s.days))].map(v=>v.slice(0,3)),
+      nextAvailableSlot:'', expertise:(doc.sr_diseases || []).map(d=>d.disease).filter(Boolean),
+      availableConsultationType:Number(doc.custom_accept_online_appointments) === 1 ? 'all' : 'opd'};
+  }
   async doctors() {
     const response = await this.erp.method('mobile_app.api.practitioners.list_doctors');
-    return {doctors: response.doctors.filter(d => this.doctorPolicy[d.id]?.enabled).map(d => {
-      const policy = this.doctorPolicy[d.id];
-      return {id: d.id, name: d.name, specialization: d.specialty, qualification: d.specialty,
-        experienceYears: policy.experienceYears || 0, imageUrl: d.image_url ? new URL(d.image_url, this.erp.url).href : policy.imageUrl || '',
-        rating: 0, totalReviews: 0, consultationFee: policy.fee, languages: policy.languages || ['Hindi','English'],
-        about: policy.about || '', isAvailable: d.is_active, availableDays: [...new Set(d.schedules.flatMap(s => s.days))].map(v => v.slice(0,3)),
-        nextAvailableSlot: '', totalConsultations: 0, expertise: d.tags, availableConsultationType: policy.mode,
-        isFreeConsultation: policy.fee === 0};
-    }), timezone: response.timezone};
+    return {doctors:await Promise.all(response.doctors.map(d=>this.doctorDetails(d))),timezone:response.timezone};
+  }
+  async bookableDoctor(id) {
+    const response = await this.erp.method('mobile_app.api.practitioners.list_doctors');
+    const row = response.doctors.find(d=>d.id === id);
+    requireValue(row, 'Doctor not available',404);
+    return this.doctorDetails(row);
+  }
+  async doctorPhoto(id) {
+    await this.bookableDoctor(id);
+    const doc = await this.erp.get('Healthcare Practitioner',id);
+    let reference = doc.image;
+    requireValue(reference, 'Doctor photo not available',404);
+    try {
+      const uri = new URL(reference,this.erp.url);
+      if (uri.origin === new URL(this.erp.url).origin && uri.pathname === '/api/method/frappe.handler.download_file') {
+        reference = uri.searchParams.get('file_url');
+      }
+    } catch { throw new ApiError(404,'not_found','Doctor photo not available'); }
+    // Publish only the practitioner's selected, attached photo, never arbitrary ERP files.
+    const files = await this.erp.list('File',{attached_to_doctype:'Healthcare Practitioner',attached_to_name:id,
+      file_url:reference},['name','file_url'],{limit:1});
+    requireValue(files.length === 1, 'Doctor photo not available',404);
+    const response = await this.erp.request(`/api/method/frappe.handler.download_file?${new URLSearchParams({file_url:reference})}`,{raw:true});
+    requireValue(['image/jpeg','image/png','image/webp','image/gif'].includes(response.headers.get('content-type')?.split(';')[0]),
+      'Doctor photo not available',404);
+    return response;
   }
   async reviewAvatars() {
     const assets=await this.records.read('system','review_assets','indian-illustrations');
@@ -92,7 +126,7 @@ export class MobileService {
     return result;
   }
   async availability(doctor, date, exclude) {
-    requireValue(this.doctorPolicy[doctor]?.enabled, 'Doctor not available', 404);
+    await this.bookableDoctor(doctor);
     requireValue(/^\d{4}-\d{2}-\d{2}$/.test(date), 'Invalid date');
     const result = await this.erp.method('mobile_app.api.practitioners.availability', {practitioner_id: doctor, date,
       ...(exclude ? {exclude_booking_id: exclude} : {})});
@@ -119,12 +153,13 @@ export class MobileService {
     }
     const patientGender = body.patientGender;
     requireValue(patientGenders.has(patientGender), 'Please select the patient gender before booking.',400,'patient_gender_required');
-    const doctor = text(body.doctorId); const policy = this.doctorPolicy[doctor];
-    requireValue(policy?.enabled, 'Doctor not available', 404);
-    requireValue(policy.fee === 0 || this.payments?.keyId, 'Payments are temporarily unavailable. No payment was taken.', 503, 'payment_setup_required');
-    requireValue(policy.fee === 0 || prepare, 'Prepare your appointment payment first',409);
+    const doctor = text(body.doctorId); const profile = await this.bookableDoctor(doctor);
+    requireValue(body.consultationFee == null || Number(body.consultationFee) === profile.consultationFee,
+      'The consultation charge has changed. Refresh the doctor details before booking.',409,'doctor_fee_changed');
+    requireValue(profile.consultationFee === 0 || this.payments?.keyId, 'Payments are temporarily unavailable. No payment was taken.', 503, 'payment_setup_required');
+    requireValue(profile.consultationFee === 0 || prepare, 'Prepare your appointment payment first',409);
     const mode = text(body.consultationType);
-    requireValue(['video','opd','audio'].includes(mode) && (policy.mode === 'all' || policy.mode === mode), 'Consultation type not available');
+    requireValue(['video','opd','audio'].includes(mode) && (profile.availableConsultationType === 'all' || profile.availableConsultationType === mode), 'Consultation type not available');
     const date = text(body.appointmentDate).slice(0,10);
     const time = text(body.time, 8);
     const reservationName = `SIYA-${recordName(user.id, 'appointment', id).slice(0,32)}`;
@@ -149,13 +184,13 @@ export class MobileService {
       mobile_number: patientPhone, email: user.email,
       payload_json: JSON.stringify({source: 'siya-mobile-api', id, patientGender, department: appointmentDepartment}),
     });
-    const saved = {id, doctorId: doctor, doctorName: reservation.doctor_name || doctor,
-      doctorImage: policy.imageUrl || '', specialization: '', appointmentDate: date, time,
+    const saved = {id, doctorId: doctor, doctorName: profile.name,
+      doctorImage: profile.imageUrl, specialization: profile.specialization, appointmentDate: date, time,
       timeSlot: `${String(Number(time.slice(0,2)) % 12 || 12).padStart(2,'0')}:${time.slice(3,5)} ${Number(time.slice(0,2)) < 12 ? 'AM' : 'PM'}`,
       consultationType: mode, patientName, patientPhone, patientEmail: user.email,
       patientGender, department: appointmentDepartment,
-      symptoms: text(body.symptoms || '', 4000), consultationFee: policy.fee, status: 'pending',
-      createdAt: new Date().toISOString(), paymentStatus: policy.fee === 0 ? 'free' : 'pending', paymentId: policy.fee === 0 ? `FREE-${id}` : null,
+      symptoms: text(body.symptoms || '', 4000), consultationFee: profile.consultationFee, status: 'pending',
+      createdAt: new Date().toISOString(), paymentStatus: profile.consultationFee === 0 ? 'free' : 'pending', paymentId: profile.consultationFee === 0 ? `FREE-${id}` : null,
       reservation: reservationName, bookingSyncPending: true, deliveryState: 'not_sent'};
     const record = await this.records.write(user.id, 'appointment', id, saved, 0);
     return prepare ? this.paymentOrder(user,record) : this.deliverAppointment(user,record,body.paymentId);

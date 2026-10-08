@@ -10,14 +10,14 @@ export class Razorpay {
     return response.json();
   }
   async create(user,appointment) {
-    return this.request('orders',{amount:appointment.consultationFee*100,currency:'INR',receipt:appointment.id.slice(0,40),
+    return this.request('orders',{amount:Math.round(appointment.consultationFee*100),currency:'INR',receipt:appointment.id.slice(0,40),
       notes:{mobile_account:user.id,appointment_id:appointment.id}});
   }
   async verify(user,appointment,paymentId) {
     requireValue(/^pay_[a-zA-Z0-9]+$/.test(paymentId || ''),'Payment reference is required');
     const payment=await this.request(`payments/${paymentId}`);
     const order=await this.request(`orders/${appointment.paymentOrderId}`);
-    requireValue(payment.order_id===appointment.paymentOrderId && payment.amount===appointment.consultationFee*100 && payment.currency==='INR'
+    requireValue(payment.order_id===appointment.paymentOrderId && payment.amount===Math.round(appointment.consultationFee*100) && payment.currency==='INR'
       && payment.status==='captured' && !payment.amount_refunded && order.notes?.mobile_account===user.id && order.notes?.appointment_id===appointment.id,
       'Payment is not confirmed for this appointment. Please contact the clinic.',409,'payment_not_verified');
     return payment;
