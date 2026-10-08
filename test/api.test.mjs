@@ -379,6 +379,29 @@ test('invoice reads reject other patients and draft invoices',async () => {
   await assert.rejects(service.invoice(user,other.name),{status:404});
   await assert.rejects(service.invoice(user,draft.name),{status:404});
 });
+test('orders work without optional shipping columns and never expose raw invoice fields',async()=>{
+  for(const shipping of [{},{sr_si_order_source:'App',si_shipkia_shipment_status:'Shipped',si_shipkia_awb_number:'TRACK-1'}]) {
+    const {service,erp}=setup();await service.identity(user);
+    const identity=await service.records.read(user.id,'identity','self');
+    const patient=await erp.create('Patient',{});
+    await service.records.write(user.id,'identity','self',{...identity.data,patient:patient.name},identity.revision);
+    const invoice=await erp.create('Sales Invoice',{patient:patient.name,docstatus:1,grand_total:1499,currency:'INR',
+      status:'Unpaid',remarks:'Private clinical notes',contact_email:'private@example.invalid',...shipping});
+    await erp.create('Sales Invoice',{patient:'another-patient',docstatus:1});
+    await erp.create('Sales Invoice',{patient:patient.name,docstatus:0});
+    const list=erp.list.bind(erp);
+    erp.list=async(type,filters,fields,options)=>{
+      if(type==='Sales Invoice') {assert.deepEqual(fields,['*']);assert.deepEqual(filters,{patient:patient.name,docstatus:1});}
+      return list(type,filters,fields,options);
+    };
+    const result=await service.orders(user);
+    assert.equal(result.items.length,1);assert.equal(result.items[0].id,invoice.name);
+    assert.equal(result.items[0].total,1499);
+    assert.equal(result.items[0].trackingNumber,shipping.si_shipkia_awb_number);
+    assert.ok(!JSON.stringify(result).includes('Private clinical notes'));
+    assert.ok(!JSON.stringify(result).includes('private@example.invalid'));
+  }
+});
 test('image content is validated before contacting ERP upload',async () => {
   const {service}=setup();
   await assert.rejects(service.upload(user,{mimeType:'image/png',base64:Buffer.from('<script>x</script>').toString('base64')}),{status:400});

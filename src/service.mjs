@@ -460,9 +460,10 @@ export class MobileService {
     const patient = await this.patient(user);
     const identity = await this.identity(user);
     // Patient-scoped invoices prevent a shared Customer from exposing another family member's care.
+    // Optional shipping fields differ across ERP sites. Read existing columns and
+    // return only the explicit order summary below, never the raw invoice record.
     const rows = await this.erp.list('Sales Invoice', identity.customers?.length ? {docstatus:1} : {patient: patient.name, docstatus: 1},
-      ['name','posting_date','grand_total','currency','status','outstanding_amount','is_return','return_against',
-        'sr_si_order_source','si_shipkia_shipment_status','si_shipkia_awb_number'], {offset, limit: 21, order: 'posting_date desc, name desc',
+      ['*'], {offset, limit: 21, order: 'posting_date desc, name desc',
         ...(identity.customers?.length ? {orFilters:[['patient','=',patient.name],['customer','in',identity.customers]]} : {})});
     const orders = identity.customers?.length ? await this.erp.list('Sales Order', {customer:['in',identity.customers],docstatus:1,per_billed:['<',100]},
       ['name','transaction_date','grand_total','currency','status'], {offset,limit:21,order:'transaction_date desc, name desc'}) : [];
