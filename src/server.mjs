@@ -33,14 +33,15 @@ export function createApi({service, authenticate, origins = [], allowBookings = 
       if (!bucket || bucket.until < now) { bucket = {count:0,until:now+60000}; limits.set(ip,bucket); }
       requireValue(++bucket.count <= 120,'Too many requests. Please try again shortly.',429);
       const url = new URL(req.url,'http://localhost');
+      const appId = url.searchParams.get('app') ?? 'siya-ayurveda';
       const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
       let result;
       if (req.method === 'GET' && url.pathname === '/health') result = {ok:true,version:1};
-      else if (req.method === 'GET' && url.pathname === '/v1/doctors') result = await service.doctors();
-      else if (req.method === 'GET' && parts.length === 4 && parts[0] === 'v1' && parts[1] === 'doctors' && parts[3] === 'photo') result = await service.doctorPhoto(parts[2]);
+      else if (req.method === 'GET' && url.pathname === '/v1/doctors') result = await service.doctors(appId);
+      else if (req.method === 'GET' && parts.length === 4 && parts[0] === 'v1' && parts[1] === 'doctors' && parts[3] === 'photo') result = await service.doctorPhoto(parts[2],appId);
       else if (req.method === 'GET' && url.pathname === '/v1/review-avatars') result = await service.reviewAvatars();
       else if (req.method === 'GET' && parts[0] === 'v1' && parts[1] === 'doctors' && parts[3] === 'slots') {
-        result = await service.availability(parts[2],url.searchParams.get('date') || '');
+        result = await service.availability(parts[2],url.searchParams.get('date') || '',undefined,appId);
       } else {
         const user = await authenticate(req.headers.authorization);
         const body = ['POST','PUT'].includes(req.method) ? await readBody(req) : {};
@@ -51,7 +52,7 @@ export function createApi({service, authenticate, origins = [], allowBookings = 
           if (route === 'GET /v1/appointments') return service.appointments(user);
           if (route === 'POST /v1/appointments' || route === 'POST /v1/appointment-orders') {
             requireValue(allowBookings,'Appointment booking is temporarily unavailable. No payment was taken.',503,'booking_setup_required');
-            return service.createAppointment(user,body,route.endsWith('/appointment-orders'));
+            return service.createAppointment(user,body,route.endsWith('/appointment-orders'),appId);
           }
           if (req.method === 'POST' && parts[1] === 'appointments' && parts[3] === 'requests') return service.appointmentChange(user,parts[2],body);
           if (route === 'GET /v1/treatments') return {items:await service.records.list(user.id,'treatment')};

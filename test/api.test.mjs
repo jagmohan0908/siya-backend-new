@@ -9,7 +9,7 @@ import {Razorpay} from '../src/payments.mjs';
 import {isPerfectDay} from '../src/habits.mjs';
 
 class FakeErp {
-  constructor() { this.docs = new Map([['Healthcare Practitioner/Megha',{name:'Megha',practitioner_name:'Megha',status:'Active',op_consulting_charge:0,custom_accept_online_appointments:0}]]); this.created = []; this.url = 'https://erp.test'; this.calendar = new Map(); this.cancelCalls = []; }
+  constructor() { this.docs = new Map([['Healthcare Practitioner/Megha',{name:'Megha',practitioner_name:'Megha',status:'Active',sr_diseases:[{disease:'Siya Ayurveda'}],op_consulting_charge:0,custom_accept_online_appointments:0}]]); this.created = []; this.url = 'https://erp.test'; this.calendar = new Map(); this.cancelCalls = []; }
   async maybe(type,name) { return this.docs.get(`${type}/${name}`) || null; }
   async get(type,name) { const value = await this.maybe(type,name); if (!value) throw new ApiError(404,'not_found','Not found'); return structuredClone(value); }
   async create(type,doc) {
@@ -512,18 +512,18 @@ test('a committed upload with a lost response is reconciled without another POST
 test('ERP controls practitioner details, diseases, charges and online eligibility without an app allowlist',async()=>{
   const {erp,service}=setup();
   await erp.update('Healthcare Practitioner','Megha',{practitioner_name:'Updated ERP name',sr_qualification:'BHMS',
-    sr_diseases:[{disease:'Skin Allergy'},{disease:'Fatty Liver Disease'}],op_consulting_charge:1000.50,
+    sr_diseases:[{disease:'Skin Allergy'},{disease:'Fatty Liver Disease'},{disease:'Siya Ayurveda'}],op_consulting_charge:1000.50,
     custom_about_doctor:'Updated biography',custom_accept_online_appointments:0,image:'/files/doctor.jpg',modified:'v1'});
   let doctor=(await service.doctors()).doctors[0];
   assert.equal(doctor.name,'Updated ERP name');assert.equal(doctor.qualification,'BHMS');
-  assert.deepEqual(doctor.expertise,['Skin Allergy','Fatty Liver Disease']);
+  assert.deepEqual(doctor.expertise,['Skin Allergy','Fatty Liver Disease','Siya Ayurveda']);
   assert.equal(doctor.about,'Updated biography');assert.equal(doctor.consultationFee,1000.5);
   assert.equal(doctor.isFreeConsultation,false);assert.equal(doctor.availableConsultationType,'opd');
-  assert.deepEqual(doctor.availableDays,['Mon','Sat']);assert.match(doctor.imageUrl,/photo\?v=v1$/);
+  assert.deepEqual(doctor.availableDays,['Mon','Sat']);assert.match(doctor.imageUrl,/photo\?app=siya-ayurveda&v=v1$/);
   await erp.update('Healthcare Practitioner','Megha',{custom_accept_online_appointments:1,image:'',op_consulting_charge:0});
   doctor=(await service.doctors()).doctors[0];
   assert.equal(doctor.availableConsultationType,'all');assert.equal(doctor.imageUrl,'');assert.equal(doctor.isFreeConsultation,true);
-  const extra=await erp.create('Healthcare Practitioner',{practitioner_name:'New doctor',status:'Active',op_consulting_charge:250});
+  const extra=await erp.create('Healthcare Practitioner',{practitioner_name:'New doctor',status:'Active',sr_diseases:[{disease:'Siya Ayurveda'}],op_consulting_charge:250});
   assert.ok((await service.doctors()).doctors.some(d=>d.id===extra.name));
   await erp.update('Healthcare Practitioner','Megha',{status:'Inactive'});
   assert.ok(!(await service.doctors()).doctors.some(d=>d.id==='Megha'));
@@ -539,6 +539,73 @@ test('online opt-out blocks video and audio before reservations; opt-in allows v
   await erp.update('Healthcare Practitioner','Megha',{custom_accept_online_appointments:1});
   const saved=await service.createAppointment(user,{...booking,consultationType:'video'});
   assert.equal(saved.consultationType,'video');
+});
+
+test('one backend filters each app by exact ERP disease membership and refreshes tag changes',async()=>{
+  const {erp,service}=setup();
+  const seed=await erp.create('Healthcare Practitioner',{status:'Active',op_consulting_charge:0,
+    sr_diseases:[{disease:'Seedfit'}]});
+  const both=await erp.create('Healthcare Practitioner',{status:'Active',op_consulting_charge:0,
+    sr_diseases:[{disease:'Seedfit'},{disease:'Siya Ayurveda'}]});
+  // Wrong tags, department fallback and missing fees must not expose or break the list.
+  await erp.create('Healthcare Practitioner',{status:'Active',department:'Siya Ayurveda',
+    sr_diseases:[{disease:'Siya Ayurveda Plus'},{disease:'Skin Allergy'}]});
+  await erp.create('Healthcare Practitioner',{status:'Active'});
+  const [siya,seedfit]=await Promise.all([service.doctors(),service.doctors('seedfit')]);
+  assert.deepEqual(siya.doctors.map(d=>d.id),['Megha',both.name]);
+  assert.deepEqual(seedfit.doctors.map(d=>d.id),[seed.name,both.name]);
+  await erp.update('Healthcare Practitioner','Megha',{sr_diseases:[{disease:'Seedfit'}]});
+  assert.ok(!(await service.doctors()).doctors.some(d=>d.id==='Megha'));
+  assert.ok((await service.doctors('seedfit')).doctors.some(d=>d.id==='Megha'));
+});
+
+test('wrong-app doctors cannot expose slots or photos or start free/paid bookings',async()=>{
+  const {erp,service}=setup();
+  await assert.rejects(service.availability('Megha',booking.appointmentDate,undefined,'seedfit'),{status:404});
+  await assert.rejects(service.doctorPhoto('Megha','seedfit'),{status:404});
+  for(const prepare of [false,true]) {
+    await assert.rejects(service.createAppointment(user,booking,prepare,'seedfit'),{status:404});
+  }
+  assert.equal(erp.created.length,0);
+});
+
+test('Seedfit booking retains its app context through slots, storage, webhook and retries',async()=>{
+  let payload;
+  const {erp,service}=setup({webhookUrl:'https://webhook.test',fetcher:async(_,req)=>{
+    payload=JSON.parse(req.body);return Response.json({});
+  }});
+  await erp.update('Healthcare Practitioner','Megha',{sr_diseases:[{disease:'Seedfit'}],image:'/files/doctor.jpg'});
+  const saved=await service.createAppointment(user,booking,false,'seedfit');
+  assert.equal(saved.appId,'seedfit');assert.equal(payload.appId,'seedfit');
+  assert.match(saved.doctorImage,/app=seedfit&/);
+  const reservation=await erp.get('Mobile App Appointment',saved.reservation);
+  assert.equal(JSON.parse(reservation.payload_json).appId,'seedfit');
+  assert.equal((await service.createAppointment(user,booking,false,'seedfit')).id,saved.id);
+  await assert.rejects(service.createAppointment(user,booking),{code:'idempotency_conflict'});
+});
+
+test('HTTP routes retain independent app context and reject unknown app IDs',async t=>{
+  const {erp,service}=setup();
+  await erp.update('Healthcare Practitioner','Megha',{sr_diseases:[{disease:'Seedfit'}],image:'/files/doctor.jpg'});
+  await erp.create('File',{attached_to_doctype:'Healthcare Practitioner',attached_to_name:'Megha',file_url:'/files/doctor.jpg'});
+  erp.request=async()=>new Response(new Uint8Array([255,216,255]),{headers:{'Content-Type':'image/jpeg'}});
+  const server=createApi({service,authenticate:async()=>user,allowBookings:true});
+  await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));
+  const base=`http://127.0.0.1:${server.address().port}`;
+  const [siya,seedfit]=await Promise.all(['siya-ayurveda','seedfit'].map(async app=>(await fetch(`${base}/v1/doctors?app=${app}`)).json()));
+  assert.equal(siya.doctors.length,0);assert.equal(seedfit.doctors.length,1);
+  assert.equal((await fetch(`${base}${seedfit.doctors[0].imageUrl}`)).status,200);
+  assert.equal((await fetch(`${base}/v1/doctors/Megha/slots?app=seedfit&date=${booking.appointmentDate}`)).status,200);
+  assert.equal((await fetch(`${base}/v1/doctors/Megha/slots?date=${booking.appointmentDate}`)).status,404);
+  for(const app of ['unknown','','constructor']) {
+    const response=await fetch(`${base}/v1/doctors?app=${app}`);
+    assert.equal(response.status,400);assert.equal((await response.json()).error.code,'invalid_app');
+  }
+  for(const route of ['appointments','appointment-orders']) {
+    const response=await fetch(`${base}/v1/${route}?app=siya-ayurveda`,{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(booking)});
+    assert.equal(response.status,404);
+  }
 });
 
 test('missing or invalid ERP charges never become free appointments',async()=>{

@@ -292,10 +292,38 @@ ERP authentication remains required.
 Doctor details and charges are read from Healthcare Practitioner records on each
 refresh and before new bookings. `op_consulting_charge` applies to consultations;
 `custom_accept_online_appointments` enables video/audio, otherwise only OPD is
-available. Active practitioners with ERP schedules/exceptions appear automatically.
+available. Active practitioners with ERP schedules/exceptions and the requesting app's disease tag appear automatically.
 No static doctor price or mode policy is used. Existing paid bookings retain their
 saved quote. The app retains its statistics and reviews for existing doctors.
 
 `GET /v1/doctors/:id/photo` serves only the selected image attached to that
 practitioner, via authenticated ERP download. Local ERP images and S3 images are
 supported by this doctor-photo route; patient profile storage is unchanged.
+
+## Shared doctor catalogue for Siya Ayurveda and Seedfit
+
+Both apps use the same backend. Doctor routes and new appointment/order requests
+accept `?app=siya-ayurveda` or `?app=seedfit`. The backend matches the exact
+`Healthcare Practitioner.sr_diseases[].disease` value: `Siya Ayurveda` or `Seedfit`.
+A practitioner with both tags appears in both apps; unrelated or untagged doctors
+appear in neither. Unknown/empty app IDs are rejected. Requests without `app`
+retain the Siya Ayurveda default for installed older versions.
+
+This filter applies to lists, photos, slots and new bookings. Photo URLs carry
+the app ID, and reservations/webhook payloads record `appId`. Tag changes take
+effect on the next refresh; existing bookings and cancellation remain accessible.
+Online eligibility and charges still come from ERP. The app selector is a public
+catalogue filter, not authentication or authorization for patient records.
+
+For Flutter, set `MOBILE_APP_ID` at build time alongside `MOBILE_API_BASE_URL`:
+
+```text
+--dart-define=MOBILE_APP_ID=siya-ayurveda
+--dart-define=MOBILE_APP_ID=seedfit
+```
+
+Choose one ID for each build. This repository defaults to Siya Ayurveda. A
+separate Seedfit client must send `app=seedfit` on doctor/slot/booking/order
+requests and use returned photo URLs. Seedfit login configuration is separate
+from this catalogue filter; the backend's existing Shopify authentication remains
+unchanged and must match the store used by that client.

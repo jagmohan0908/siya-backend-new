@@ -9,6 +9,11 @@ export const appointmentStatus = value => statuses[value] || 'pending';
 const cleanProfile = data => Object.fromEntries(['name','gender','dateOfBirth','height','weight'].filter(k => data[k] != null).map(k => [k, text(String(data[k]), 150)]));
 const patientGenders = new Set(['Male','Female','Other','Prefer not to say','Non-Conforming','Genderqueer','Transgender']);
 const appointmentDepartment = 'Skin/Fertility/Liver/IBS';
+const appDoctorTags = new Map([['siya-ayurveda', 'Siya Ayurveda'], ['seedfit', 'Seedfit']]);
+const doctorTag = appId => {
+  requireValue(appDoctorTags.has(appId), 'Unknown app ID',400,'invalid_app');
+  return appDoctorTags.get(appId);
+};
 
 export class MobileService {
   constructor({erp, webhookUrl, webhookSecret, fetcher = fetch, rewardIssuer, payments,
@@ -64,34 +69,39 @@ export class MobileService {
     await this.erp.update('Mobile App User', identity.erpUser, {full_name: fields.name});
     return saved;
   }
-  async doctorDetails(row) {
+  async doctorDetails(row, appId = 'siya-ayurveda') {
+    const tag = doctorTag(appId);
     const doc = await this.erp.get('Healthcare Practitioner', row.id);
-    requireValue(doc.status === 'Active', 'Doctor not available',404);
+    if (doc.status !== 'Active' || !(doc.sr_diseases || []).some(d => d.disease === tag)) return null;
     const fee = doc.op_consulting_charge;
     requireValue(fee !== null && fee !== undefined && fee !== '' && Number.isFinite(Number(fee)) && Number(fee) >= 0,
       'The clinic needs to configure this doctor\'s consultation charge.',503,'doctor_fee_unavailable');
     const qualification = doc.sr_qualification || '';
     return {id:doc.name, name:doc.practitioner_name || doc.name,
       specialization:qualification || doc.department || '', qualification,
-      imageUrl:doc.image ? `/v1/doctors/${encodeURIComponent(doc.name)}/photo?v=${encodeURIComponent(doc.modified || doc.image)}` : '',
+      imageUrl:doc.image ? `/v1/doctors/${encodeURIComponent(doc.name)}/photo?app=${encodeURIComponent(appId)}&v=${encodeURIComponent(doc.modified || doc.image)}` : '',
       consultationFee:Math.round(Number(fee)*100)/100, isFreeConsultation:Number(fee) === 0,
       about:doc.custom_about_doctor || '', isAvailable:true,
       availableDays:[...new Set((row.schedules || []).flatMap(s=>s.days))].map(v=>v.slice(0,3)),
       nextAvailableSlot:'', expertise:(doc.sr_diseases || []).map(d=>d.disease).filter(Boolean),
       availableConsultationType:Number(doc.custom_accept_online_appointments) === 1 ? 'all' : 'opd'};
   }
-  async doctors() {
+  async doctors(appId = 'siya-ayurveda') {
+    doctorTag(appId);
     const response = await this.erp.method('mobile_app.api.practitioners.list_doctors');
-    return {doctors:await Promise.all(response.doctors.map(d=>this.doctorDetails(d))),timezone:response.timezone};
+    return {doctors:(await Promise.all(response.doctors.map(d=>this.doctorDetails(d,appId)))).filter(Boolean),timezone:response.timezone,appId};
   }
-  async bookableDoctor(id) {
+  async bookableDoctor(id, appId = 'siya-ayurveda') {
+    doctorTag(appId);
     const response = await this.erp.method('mobile_app.api.practitioners.list_doctors');
     const row = response.doctors.find(d=>d.id === id);
     requireValue(row, 'Doctor not available',404);
-    return this.doctorDetails(row);
+    const doctor = await this.doctorDetails(row,appId);
+    requireValue(doctor, 'Doctor not available',404);
+    return doctor;
   }
-  async doctorPhoto(id) {
-    await this.bookableDoctor(id);
+  async doctorPhoto(id, appId = 'siya-ayurveda') {
+    await this.bookableDoctor(id,appId);
     const doc = await this.erp.get('Healthcare Practitioner',id);
     let reference = doc.image;
     requireValue(reference, 'Doctor photo not available',404);
@@ -125,8 +135,8 @@ export class MobileService {
     }
     return result;
   }
-  async availability(doctor, date, exclude) {
-    await this.bookableDoctor(doctor);
+  async availability(doctor, date, exclude, appId = 'siya-ayurveda') {
+    await this.bookableDoctor(doctor,appId);
     requireValue(/^\d{4}-\d{2}-\d{2}$/.test(date), 'Invalid date');
     const result = await this.erp.method('mobile_app.api.practitioners.availability', {practitioner_id: doctor, date,
       ...(exclude ? {exclude_booking_id: exclude} : {})});
@@ -135,12 +145,13 @@ export class MobileService {
       appointment_status: ['not in', ['Cancelled','No Show']]}, ['appointment_time'], {limit: 1000});
     return {...result, slots: result.slots.filter(s => !clinic.some(b => String(b.appointment_time).slice(0,5) === s.time.slice(0,5)))};
   }
-  async createAppointment(user, body, prepare = false) {
+  async createAppointment(user, body, prepare = false, appId = 'siya-ayurveda') {
+    doctorTag(appId);
     object(body); const id = text(body.id, 100);
     requireValue(/^[a-zA-Z0-9-]{16,100}$/.test(id), 'A stable booking ID is required');
     let existing = await this.records.read(user.id, 'appointment', id);
     if (existing) {
-      requireValue(existing.data.doctorId===body.doctorId && existing.data.appointmentDate===String(body.appointmentDate).slice(0,10)
+      requireValue((existing.data.appId || 'siya-ayurveda')===appId && existing.data.doctorId===body.doctorId && existing.data.appointmentDate===String(body.appointmentDate).slice(0,10)
         && existing.data.time===body.time && existing.data.consultationType===body.consultationType && existing.data.patientName===body.patientName
         && (!existing.data.patientGender || existing.data.patientGender===body.patientGender),
         'This booking ID already belongs to another appointment. Start a new booking.',409,'idempotency_conflict');
@@ -153,7 +164,7 @@ export class MobileService {
     }
     const patientGender = body.patientGender;
     requireValue(patientGenders.has(patientGender), 'Please select the patient gender before booking.',400,'patient_gender_required');
-    const doctor = text(body.doctorId); const profile = await this.bookableDoctor(doctor);
+    const doctor = text(body.doctorId); const profile = await this.bookableDoctor(doctor,appId);
     requireValue(body.consultationFee == null || Number(body.consultationFee) === profile.consultationFee,
       'The consultation charge has changed. Refresh the doctor details before booking.',409,'doctor_fee_changed');
     requireValue(profile.consultationFee === 0 || this.payments?.keyId, 'Payments are temporarily unavailable. No payment was taken.', 503, 'payment_setup_required');
@@ -164,7 +175,7 @@ export class MobileService {
     const time = text(body.time, 8);
     const reservationName = `SIYA-${recordName(user.id, 'appointment', id).slice(0,32)}`;
     let reservation = await this.erp.maybe('Mobile App Appointment', reservationName);
-    const slots = await this.availability(doctor, date, reservation ? id : undefined);
+    const slots = await this.availability(doctor, date, reservation ? id : undefined, appId);
     const slot = slots.slots.find(s => s.time === time);
     requireValue(slot, 'This slot is no longer available. Please select another.', 409, 'slot_unavailable');
     requireValue(this.webhookUrl, 'Appointment booking is temporarily unavailable. No payment was taken.',503,'booking_setup_required');
@@ -182,9 +193,9 @@ export class MobileService {
       practitioner_id: doctor, practitioner_schedule: slot.schedule_id, appointment_date: date, appointment_time: time,
       duration: slot.duration, status: 'Pending', consultation_type: mode, patient_name: patientName,
       mobile_number: patientPhone, email: user.email,
-      payload_json: JSON.stringify({source: 'siya-mobile-api', id, patientGender, department: appointmentDepartment}),
+      payload_json: JSON.stringify({source: 'siya-mobile-api', appId, id, patientGender, department: appointmentDepartment}),
     });
-    const saved = {id, doctorId: doctor, doctorName: profile.name,
+    const saved = {id, appId, doctorId: doctor, doctorName: profile.name,
       doctorImage: profile.imageUrl, specialization: profile.specialization, appointmentDate: date, time,
       timeSlot: `${String(Number(time.slice(0,2)) % 12 || 12).padStart(2,'0')}:${time.slice(3,5)} ${Number(time.slice(0,2)) < 12 ? 'AM' : 'PM'}`,
       consultationType: mode, patientName, patientPhone, patientEmail: user.email,
