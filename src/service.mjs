@@ -3,6 +3,7 @@ import {ApiError, object, requireValue, text} from './errors.mjs';
 import {Records, SerialQueue, recordName} from './store.mjs';
 import {isPerfectDay} from './habits.mjs';
 import {orderDetails, trackingSummary} from './order-details.mjs';
+import {patientDiets, dietPdf} from './diets.mjs';
 
 const day = () => new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit'}).format(new Date());
 const statuses = {Pending: 'pending', Approved: 'confirmed', Confirmed: 'confirmed', 'Checked In': 'checked_in', Completed: 'completed', Cancelled: 'cancelled'};
@@ -446,16 +447,10 @@ export class MobileService {
     return this.erp.get('Patient', patient);
   }
   async diets(user) {
-    const patient = await this.patient(user);
-    const links = await this.erp.list('Patient Encounter', {patient: patient.name, docstatus: ['<',2], diet_chart: ['is','set']},
-      ['name','diet_chart','encounter_date'], {limit: 50});
-    const items = [];
-    for (const link of links) {
-      const chart = await this.erp.get('Diet Chart', link.diet_chart);
-      items.push({id: link.name, date: link.encounter_date, title: chart.diet_chart_name,
-        instructions: chart.instructions, allowedFoods: chart.allowed_foods, restrictedFoods: chart.restricted_foods});
-    }
-    return {items};
+    return patientDiets(this.erp,await this.patient(user));
+  }
+  async dietPdf(user, id) {
+    return dietPdf(this.erp,await this.patient(user),id);
   }
   async orders(user, offset = 0) {
     const patient = await this.patient(user);
