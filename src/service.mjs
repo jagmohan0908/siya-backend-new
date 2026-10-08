@@ -77,14 +77,17 @@ export class MobileService {
     requireValue(fee !== null && fee !== undefined && fee !== '' && Number.isFinite(Number(fee)) && Number(fee) >= 0,
       'The clinic needs to configure this doctor\'s consultation charge.',503,'doctor_fee_unavailable');
     const qualification = doc.sr_qualification || '';
+    const opd = Number(doc.custom_accept_opd_appointments ?? 1) === 1;
+    const online = Number(doc.custom_accept_online_appointments) === 1;
     return {id:doc.name, name:doc.practitioner_name || doc.name,
       specialization:qualification || doc.department || '', qualification,
       imageUrl:doc.image ? `/v1/doctors/${encodeURIComponent(doc.name)}/photo?app=${encodeURIComponent(appId)}&v=${encodeURIComponent(doc.modified || doc.image)}` : '',
       consultationFee:Math.round(Number(fee)*100)/100, isFreeConsultation:Number(fee) === 0,
-      about:doc.custom_about_doctor || '', isAvailable:true,
+      about:doc.custom_about_doctor || '', isAvailable:opd || online,
+      acceptsOpdAppointments:opd, acceptsOnlineAppointments:online,
       availableDays:[...new Set((row.schedules || []).flatMap(s=>s.days))].map(v=>v.slice(0,3)),
       nextAvailableSlot:'', expertise:(doc.sr_diseases || []).map(d=>d.disease).filter(Boolean),
-      availableConsultationType:Number(doc.custom_accept_online_appointments) === 1 ? 'all' : 'opd'};
+      availableConsultationType:opd ? (online ? 'all' : 'opd') : (online ? 'online' : 'none')};
   }
   async doctors(appId = 'siya-ayurveda') {
     doctorTag(appId);
@@ -136,14 +139,14 @@ export class MobileService {
     return result;
   }
   async availability(doctor, date, exclude, appId = 'siya-ayurveda') {
-    await this.bookableDoctor(doctor,appId);
+    const profile = await this.bookableDoctor(doctor,appId);
     requireValue(/^\d{4}-\d{2}-\d{2}$/.test(date), 'Invalid date');
     const result = await this.erp.method('mobile_app.api.practitioners.availability', {practitioner_id: doctor, date,
       ...(exclude ? {exclude_booking_id: exclude} : {})});
     // Include legacy/direct clinic bookings omitted by the existing mobile availability API.
     const clinic = await this.erp.list('Clinic Appointment', {practitioner: doctor, appointment_date: date,
       appointment_status: ['not in', ['Cancelled','No Show']]}, ['appointment_time'], {limit: 1000});
-    return {...result, slots: result.slots.filter(s => !clinic.some(b => String(b.appointment_time).slice(0,5) === s.time.slice(0,5)))};
+    return {...result, slots: !profile.isAvailable ? [] : result.slots.filter(s => !clinic.some(b => String(b.appointment_time).slice(0,5) === s.time.slice(0,5)))};
   }
   async createAppointment(user, body, prepare = false, appId = 'siya-ayurveda') {
     doctorTag(appId);
@@ -165,12 +168,14 @@ export class MobileService {
     const patientGender = body.patientGender;
     requireValue(patientGenders.has(patientGender), 'Please select the patient gender before booking.',400,'patient_gender_required');
     const doctor = text(body.doctorId); const profile = await this.bookableDoctor(doctor,appId);
+    requireValue(profile.isAvailable, 'This doctor is not accepting appointments.',400,'consultation_unavailable');
+    const mode = text(body.consultationType);
+    requireValue(['video','opd','audio'].includes(mode) && (profile.availableConsultationType === 'all' || profile.availableConsultationType === mode ||
+      (profile.availableConsultationType === 'online' && ['video','audio'].includes(mode))), 'Consultation type not available');
     requireValue(body.consultationFee == null || Number(body.consultationFee) === profile.consultationFee,
       'The consultation charge has changed. Refresh the doctor details before booking.',409,'doctor_fee_changed');
     requireValue(profile.consultationFee === 0 || this.payments?.keyId, 'Payments are temporarily unavailable. No payment was taken.', 503, 'payment_setup_required');
     requireValue(profile.consultationFee === 0 || prepare, 'Prepare your appointment payment first',409);
-    const mode = text(body.consultationType);
-    requireValue(['video','opd','audio'].includes(mode) && (profile.availableConsultationType === 'all' || profile.availableConsultationType === mode), 'Consultation type not available');
     const date = text(body.appointmentDate).slice(0,10);
     const time = text(body.time, 8);
     const reservationName = `SIYA-${recordName(user.id, 'appointment', id).slice(0,32)}`;

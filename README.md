@@ -291,8 +291,12 @@ ERP authentication remains required.
 
 Doctor details and charges are read from Healthcare Practitioner records on each
 refresh and before new bookings. `op_consulting_charge` applies to consultations;
-`custom_accept_online_appointments` enables video/audio, otherwise only OPD is
-available. Active practitioners with ERP schedules/exceptions and the requesting app's disease tag appear automatically.
+`custom_accept_opd_appointments` and `custom_accept_online_appointments` independently
+control OPD and online (video/audio). The API returns `opd`, `online`, `all`, or
+`none` as `availableConsultationType`, plus both boolean flags. With neither
+enabled, `isAvailable` is false, slots are empty and new bookings are blocked.
+Older ERP installations without the OPD field retain their previous OPD default.
+The app refreshes these settings and rechecks them before booking. Active practitioners with ERP schedules/exceptions and the requesting app's disease tag appear automatically.
 No static doctor price or mode policy is used. Existing paid bookings retain their
 saved quote. The app retains its statistics and reviews for existing doctors.
 

@@ -617,6 +617,39 @@ test('missing or invalid ERP charges never become free appointments',async()=>{
   }
 });
 
+test('independent ERP OPD and Online switches control both apps and all booking modes',async()=>{
+  for(const appId of ['siya-ayurveda','seedfit']) {
+    for(const [opd,online,expected] of [[1,0,'opd'],[0,1,'online'],[1,1,'all'],[0,0,'none']]) {
+      for(const mode of ['opd','video','audio']) {
+        const {erp,service}=setup({webhookUrl:'https://webhook.test',fetcher:async()=>Response.json({})});
+        await erp.update('Healthcare Practitioner','Megha',{
+          sr_diseases:[{disease:'Siya Ayurveda'},{disease:'Seedfit'}],
+          custom_accept_opd_appointments:opd,custom_accept_online_appointments:online});
+        const doctor=(await service.doctors(appId)).doctors[0];
+        assert.equal(doctor.availableConsultationType,expected);
+        assert.equal(doctor.isAvailable,Boolean(opd || online));
+        assert.equal(doctor.acceptsOpdAppointments,Boolean(opd));
+        assert.equal(doctor.acceptsOnlineAppointments,Boolean(online));
+        const allowed=mode==='opd' ? opd : online;
+        const request=service.createAppointment(user,{...booking,consultationType:mode},false,appId);
+        if(allowed) assert.equal((await request).consultationType,mode);
+        else { await assert.rejects(request,{status:400});assert.equal(erp.created.length,0); }
+        if(!opd && !online) assert.deepEqual((await service.availability('Megha',booking.appointmentDate,undefined,appId)).slots,[]);
+      }
+    }
+  }
+});
+
+test('saved appointment type changes are reread before a new booking',async()=>{
+  const {erp,service}=setup({webhookUrl:'https://webhook.test',fetcher:async()=>Response.json({})});
+  assert.equal((await service.doctors()).doctors[0].availableConsultationType,'opd');
+  await erp.update('Healthcare Practitioner','Megha',{custom_accept_opd_appointments:0,custom_accept_online_appointments:1});
+  await assert.rejects(service.createAppointment(user,booking),{status:400});
+  assert.equal(erp.created.length,0);
+  assert.equal((await service.doctors()).doctors[0].availableConsultationType,'online');
+  assert.equal((await service.createAppointment(user,{...booking,consultationType:'video'})).consultationType,'video');
+});
+
 test('current ERP fee wins over a stale client quote and supports fractional rupees',async()=>{
   let charge;
   const {erp,service}=setup({webhookUrl:'https://webhook.test',payments:{keyId:'test',create:async(_,a)=>{charge=a.consultationFee;return {id:'test-order'};}}});
