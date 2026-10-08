@@ -391,7 +391,7 @@ test('orders work without optional shipping columns and never expose raw invoice
     await erp.create('Sales Invoice',{patient:patient.name,docstatus:0});
     const list=erp.list.bind(erp);
     erp.list=async(type,filters,fields,options)=>{
-      if(type==='Sales Invoice') {assert.deepEqual(fields,['*']);assert.deepEqual(filters,{patient:patient.name,docstatus:1});}
+      if(type==='Sales Invoice') {assert.deepEqual(fields,['name','posting_date']);assert.deepEqual(filters,{patient:patient.name,docstatus:1});}
       return list(type,filters,fields,options);
     };
     const result=await service.orders(user);
@@ -401,6 +401,50 @@ test('orders work without optional shipping columns and never expose raw invoice
     assert.ok(!JSON.stringify(result).includes('Private clinical notes'));
     assert.ok(!JSON.stringify(result).includes('private@example.invalid'));
   }
+});
+
+test('shipment refresh checks ownership, updates events and isolates carrier failures',async()=>{
+  const {service,erp}=setup();await service.identity(user);
+  const identity=await service.records.read(user.id,'identity','self');
+  const patient=await erp.create('Patient',{});
+  await service.records.write(user.id,'identity','self',{...identity.data,patient:patient.name},identity.revision);
+  const invoice=await erp.create('Sales Invoice',{patient:patient.name,customer:'customer',docstatus:1,items:[]});
+  const other=await erp.create('Sales Invoice',{patient:'other',docstatus:1,items:[]});
+  erp.docs.set('DocType/Shipment Tracking Shipment',{name:'Shipment Tracking Shipment'});
+  const shipment=await erp.create('Shipment Tracking Shipment',{sales_invoice:invoice.name,patient:patient.name,customer:'customer',
+    shipkia_order_id:'ORDER',shipkia_awb_number:'AWB',shipkia_status:'Dispatched',raw_latest_response:'PRIVATE',events:[]});
+  let calls=0,failed=false,enabled=true;
+  erp.method=async(name,args,write)=>{
+    if(name.endsWith('get_tracking_ui_settings')) return {enable_manual_tracking_refresh:enabled};
+    assert.ok(name.endsWith('sync_tracking_for_invoice'));assert.equal(write,true);assert.equal(args.invoice_name,invoice.name);calls++;
+    if(failed) throw Error('Carrier offline');
+    await erp.update('Shipment Tracking Shipment',shipment.name,{shipkia_status:'In transit',last_synced_on:'2026-10-08 12:00:00',
+      events:[{status:'In transit',date_time:'2026-10-08 12:00:00',location:'Delhi'}]});
+  };
+  await assert.rejects(service.refreshInvoiceTracking(user,other.name),{status:404});assert.equal(calls,0);
+  const result=await service.refreshInvoiceTracking(user,invoice.name);
+  assert.equal(result.refreshState,'updated');assert.equal(result.tracking.status,'In transit');assert.equal(result.tracking.events.length,1);
+  assert.ok(!JSON.stringify(result).includes('PRIVATE'));
+  failed=true;
+  const fallback=await service.refreshInvoiceTracking(user,invoice.name);
+  assert.equal(fallback.refreshState,'unavailable');assert.equal(fallback.tracking.status,'In transit');
+  enabled=false;
+  assert.equal((await service.refreshInvoiceTracking(user,invoice.name)).refreshState,'saved');assert.equal(calls,2);
+  await erp.update('Sales Invoice',invoice.name,{si_shipkia_order_id:'FOREIGN'});
+  await assert.rejects(service.refreshInvoiceTracking(user,invoice.name),{status:404});assert.equal(calls,2);
+  await erp.update('Sales Invoice',invoice.name,{si_shipkia_order_id:'ORDER'});
+  await erp.update('Shipment Tracking Shipment',shipment.name,{patient:'other'});
+  await assert.rejects(service.refreshInvoiceTracking(user,invoice.name),{status:404});assert.equal(calls,2);
+});
+
+test('an invoice without a shipment never triggers a carrier request',async()=>{
+  const {service,erp}=setup();await service.identity(user);
+  const identity=await service.records.read(user.id,'identity','self');
+  const patient=await erp.create('Patient',{});
+  await service.records.write(user.id,'identity','self',{...identity.data,patient:patient.name},identity.revision);
+  const invoice=await erp.create('Sales Invoice',{patient:patient.name,docstatus:1,items:[]});
+  erp.method=async()=>{throw Error('Must not call a tracking integration');};
+  assert.deepEqual(await service.refreshInvoiceTracking(user,invoice.name),{tracking:null,refreshState:'not_available'});
 });
 test('image content is validated before contacting ERP upload',async () => {
   const {service}=setup();

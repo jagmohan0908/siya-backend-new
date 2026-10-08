@@ -331,3 +331,21 @@ separate Seedfit client must send `app=seedfit` on doctor/slot/booking/order
 requests and use returned photo URLs. Seedfit login configuration is separate
 from this catalogue filter; the backend's existing Shopify authentication remains
 unchanged and must match the store used by that client.
+
+## Order details, product images and tracking
+
+Order lists and invoice details include the authorized invoice's patient name,
+mobile number, patient ID, every line item, totals and available shipment details.
+Billing values always come from ERP. Shopify Storefront supplies images matched
+by exact variant SKU, or an unambiguous exact product title. Catalogue images
+are cached for five minutes; missing/ambiguous products or Shopify outages leave
+a placeholder without blocking invoices. No clinical data is sent to Shopify.
+
+`POST /v1/invoices/:id/tracking` verifies invoice ownership before consulting
+`Shipment Tracking Shipment`. It refreshes through the installed
+`shipment_tracking.api.tracking.sync_tracking_for_invoice` only when a shipment
+exists and ERP enables manual refresh. It never creates or dispatches shipments.
+A carrier failure returns the saved tracking snapshot with `refreshState:
+unavailable`; absent tracking is omitted. The app reads fresh orders on entry,
+resume and pull-to-refresh, and refreshes carrier tracking when opening an invoice.
+The app displays billing and delivery separately and downloads the ERP invoice PDF.

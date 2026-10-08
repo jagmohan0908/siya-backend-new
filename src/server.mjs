@@ -5,6 +5,7 @@ import {createAuthenticator} from './auth.mjs';
 import {MobileService} from './service.mjs';
 import {createRewardIssuer} from './shopify.mjs';
 import {Razorpay} from './payments.mjs';
+import {createProductImages} from './product-images.mjs';
 import {ApiError, requireValue} from './errors.mjs';
 
 async function readBody(req) {
@@ -67,6 +68,7 @@ export function createApi({service, authenticate, origins = [], allowBookings = 
             requireValue(Number.isSafeInteger(offset) && offset >= 0 && offset <= 100000,'Invalid cursor');
             return service.orders(user,offset);
           }
+          if (req.method === 'POST' && parts[1] === 'invoices' && parts.length === 4 && parts[3] === 'tracking') return service.refreshInvoiceTracking(user,parts[2]);
           if (req.method === 'GET' && parts[1] === 'invoices' && parts.length >= 3) return service.invoice(user,parts[2],parts[3] === 'pdf');
           throw new ApiError(404,'not_found','Endpoint not found');
         });
@@ -94,6 +96,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const erp = new Erp({url:process.env.ERP_URL,token:process.env.ERP_TOKEN});
   const service = new MobileService({erp,webhookUrl:process.env.APPOINTMENT_WEBHOOK_URL,
     s3PresignMethod:process.env.S3_PRESIGN_METHOD,
+    productImage:createProductImages({domain:process.env.SHOPIFY_DOMAIN,storefrontToken:process.env.SHOPIFY_STOREFRONT_TOKEN}),
     payments:new Razorpay({keyId:process.env.RAZORPAY_KEY_ID,keySecret:process.env.RAZORPAY_KEY_SECRET}),
     webhookSecret:process.env.APPOINTMENT_WEBHOOK_SECRET,rewardIssuer:createRewardIssuer({domain:process.env.SHOPIFY_DOMAIN,adminToken:process.env.SHOPIFY_ADMIN_TOKEN})});
   const server = createApi({service,authenticate:createAuthenticator({domain:process.env.SHOPIFY_DOMAIN,storefrontToken:process.env.SHOPIFY_STOREFRONT_TOKEN}),

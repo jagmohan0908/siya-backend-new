@@ -2,6 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {ApiError, object, requireValue, text} from './errors.mjs';
 import {Records, SerialQueue, recordName} from './store.mjs';
 import {isPerfectDay} from './habits.mjs';
+import {orderDetails, trackingSummary} from './order-details.mjs';
 
 const day = () => new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit'}).format(new Date());
 const statuses = {Pending: 'pending', Approved: 'confirmed', Confirmed: 'confirmed', 'Checked In': 'checked_in', Completed: 'completed', Cancelled: 'cancelled'};
@@ -16,9 +17,9 @@ const doctorTag = appId => {
 };
 
 export class MobileService {
-  constructor({erp, webhookUrl, webhookSecret, fetcher = fetch, rewardIssuer, payments,
+  constructor({erp, webhookUrl, webhookSecret, fetcher = fetch, rewardIssuer, payments, productImage = async () => '',
     s3PresignMethod = 'sriaas_clinic.api.s3.presign.get_presigned_url'}) {
-    Object.assign(this, {erp, webhookUrl, webhookSecret, fetcher, rewardIssuer, payments, s3PresignMethod});
+    Object.assign(this, {erp, webhookUrl, webhookSecret, fetcher, rewardIssuer, payments, productImage, s3PresignMethod});
     this.records = new Records(erp); this.queue = new SerialQueue();
   }
   async identity(user) {
@@ -460,30 +461,76 @@ export class MobileService {
     const patient = await this.patient(user);
     const identity = await this.identity(user);
     // Patient-scoped invoices prevent a shared Customer from exposing another family member's care.
-    // Optional shipping fields differ across ERP sites. Read existing columns and
-    // return only the explicit order summary below, never the raw invoice record.
+    // List only core fields; optional shipping data is read from the owned document.
+    // Return only the explicit order details below, never the raw ERP record.
     const rows = await this.erp.list('Sales Invoice', identity.customers?.length ? {docstatus:1} : {patient: patient.name, docstatus: 1},
-      ['*'], {offset, limit: 21, order: 'posting_date desc, name desc',
+      ['name','posting_date'], {offset, limit: 21, order: 'posting_date desc, name desc',
         ...(identity.customers?.length ? {orFilters:[['patient','=',patient.name],['customer','in',identity.customers]]} : {})});
     const orders = identity.customers?.length ? await this.erp.list('Sales Order', {customer:['in',identity.customers],docstatus:1,per_billed:['<',100]},
       ['name','transaction_date','grand_total','currency','status'], {offset,limit:21,order:'transaction_date desc, name desc'}) : [];
-    return {items: [...orders.slice(0,20).map(r => ({id:r.name,date:r.transaction_date,total:r.grand_total,currency:r.currency,
-      documentType:'Sales Order',paymentStatus:'Awaiting invoice',deliveryStatus:r.status})), ...rows.slice(0,20).map(r => ({id: r.name, date: r.posting_date, total: r.grand_total, currency: r.currency,
-      documentType:'Sales Invoice',
-      paymentStatus: r.status, outstanding: r.outstanding_amount, isReturn: Boolean(r.is_return), returnAgainst: r.return_against,
-      source: r.sr_si_order_source, deliveryStatus: r.si_shipkia_shipment_status, trackingNumber: r.si_shipkia_awb_number}))],
+    const items = [];
+    const documents = [...orders.slice(0,20).map(r=>({type:'Sales Order',name:r.name})),
+      ...rows.slice(0,20).map(r=>({type:'Sales Invoice',name:r.name}))];
+    for (let i=0; i<documents.length; i+=4) {
+      items.push(...await Promise.all(documents.slice(i,i+4).map(async row=>{
+        const doc = await this.erp.get(row.type,row.name);
+        requireValue(doc.docstatus === 1 && (row.type === 'Sales Invoice' && doc.patient === patient.name ||
+          identity.customers?.includes(doc.customer)), 'Order not found',404);
+        const shipment = row.type === 'Sales Invoice' ? await this.invoiceShipment(doc) : null;
+        return orderDetails({...doc,doctype:row.type},patient,this.productImage,
+          row.type === 'Sales Invoice' ? trackingSummary(doc,shipment) : null);
+      })));
+    }
+    return {items:items.sort((a,b)=>String(b.date).localeCompare(String(a.date))),
       nextCursor: rows.length > 20 || orders.length > 20 ? offset + 20 : null};
   }
-  async invoice(user, id, pdf = false) {
+  async invoiceShipment(invoice) {
+    if (!this.shipmentCapability || this.shipmentCapability.until < Date.now()) {
+      this.shipmentCapability = {until:Date.now()+300_000,
+        ready:this.erp.maybe('DocType','Shipment Tracking Shipment').then(Boolean).catch(()=>false)};
+    }
+    if (!await this.shipmentCapability.ready) return null;
+    const rows = await this.erp.list('Shipment Tracking Shipment',{sales_invoice:invoice.name},['name'],{limit:2});
+    if (rows.length !== 1) return null;
+    const shipment = await this.erp.get('Shipment Tracking Shipment',rows[0].name);
+    requireValue(shipment.sales_invoice === invoice.name && (!shipment.patient || shipment.patient === invoice.patient) &&
+      (!shipment.customer || shipment.customer === invoice.customer) &&
+      (!invoice.si_shipkia_shipment || invoice.si_shipkia_shipment === shipment.name) &&
+      (!invoice.si_shipkia_order_id || invoice.si_shipkia_order_id === shipment.shipkia_order_id),
+      'Shipment not available',404);
+    return shipment;
+  }
+  async ownedInvoice(user, id) {
     const patient = await this.patient(user);
     const identity=await this.identity(user);
     const invoice = await this.erp.get('Sales Invoice', id);
     requireValue((invoice.patient === patient.name || identity.customers?.includes(invoice.customer)) && invoice.docstatus === 1, 'Invoice not found', 404);
-    if (pdf) return this.erp.request(`/api/method/frappe.utils.print_format.download_pdf?${new URLSearchParams({doctype:'Sales Invoice',name:id,format:'Standard',no_letterhead:'0'})}`, {raw:true});
-    return {id: invoice.name, date: invoice.posting_date, currency: invoice.currency, total: invoice.grand_total,
-      paymentStatus: invoice.status, outstanding: invoice.outstanding_amount, isReturn: Boolean(invoice.is_return),
-      items: invoice.items.map(i => ({name:i.item_name,quantity:i.qty,rate:i.rate,total:i.amount}))};
+    return {invoice,patient};
   }
+  async invoice(user, id, pdf = false) {
+    const {invoice,patient} = await this.ownedInvoice(user,id);
+    if (pdf) return this.erp.request(`/api/method/frappe.utils.print_format.download_pdf?${new URLSearchParams({doctype:'Sales Invoice',name:id,format:'Standard',no_letterhead:'0'})}`, {raw:true});
+    return orderDetails({...invoice,doctype:'Sales Invoice'},patient,this.productImage,
+      trackingSummary(invoice,await this.invoiceShipment(invoice)));
+  }
+  async refreshInvoiceTracking(user, id) {
+    // Authorize before querying tracking or triggering a carrier refresh.
+    const {invoice} = await this.ownedInvoice(user,id);
+    const shipment = await this.invoiceShipment(invoice);
+    if (!shipment) return {tracking:trackingSummary(invoice,null),refreshState:'not_available'};
+    try {
+      const settings = await this.erp.method('shipment_tracking.api.tracking.get_tracking_ui_settings');
+      if (!settings?.enable_manual_tracking_refresh || !shipment.shipkia_order_id) {
+        return {tracking:trackingSummary(invoice,shipment),refreshState:'saved'};
+      }
+      await this.erp.method('shipment_tracking.api.tracking.sync_tracking_for_invoice',{invoice_name:id},true);
+      const updated = await this.invoiceShipment(invoice);
+      return {tracking:trackingSummary(invoice,updated),refreshState:'updated'};
+    } catch {
+      return {tracking:trackingSummary(invoice,shipment),refreshState:'unavailable'};
+    }
+  }
+
   async upload(user, body) {
     const identity = await this.identity(user);
     const isProfile = body.purpose !== 'treatment';
