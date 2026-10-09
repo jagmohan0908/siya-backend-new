@@ -19,10 +19,10 @@ export function trackingSummary(invoice, shipment) {
   };
 }
 
-export async function orderDetails(invoice, patient, productImage, tracking = null) {
+export async function orderDetails(invoice, patient, productImage, tracking = null, kit = null) {
   const invoicePatient = invoice.patient === patient?.name;
   return {
-    id:invoice.name,documentType:invoice.doctype || 'Sales Invoice',
+    id:invoice.name,documentType:invoice.doctype || 'Sales Invoice',kit,
     date:invoice.posting_date || invoice.transaction_date,currency:invoice.currency,total:invoice.grand_total,
     subtotal:invoice.net_total ?? invoice.total,taxes:invoice.total_taxes_and_charges || 0,
     discount:invoice.discount_amount || 0,rounding:invoice.rounding_adjustment || 0,

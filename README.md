@@ -401,3 +401,47 @@ The app refreshes charts on opening, resuming and manual refresh, explains autom
 selection, and offers the attached PDF. Downloads recheck patient eligibility and
 proxy only PDF uploads on the configured ERP host; credentials and attachment URLs
 are not sent to the app. Remote/S3 PDF links need a separate supported signing flow.
+
+
+## Invoice-backed habit data with the existing app UI
+
+`GET /v1/habit-tracker?app=siya-ayurveda` (or `seedfit`) returns submitted,
+non-return invoices, their Item Group Template display names, and their actual
+invoice items. Unpaid submitted invoices qualify. Draft/cancelled invoices do not.
+Credit notes linked through `return_against` remove fully returned products from
+check-ins. Shared billing customers never expose another named patient's habits.
+All invoice pages are loaded; a product bought in multiple orders appears once in
+the combined checklist. Kit and single-product purchases both qualify.
+
+The app retains its existing home, checklist, progress, reminders, coins and
+purchase navigation. It no longer checks Shopify orders to unlock these screens.
+Shopify still supplies catalogue images, purchases and discount issuance.
+`kit.name` in order responses resolves the invoice's Item Group Template, not its
+internal ID. Kit image and reorder destination may be configured on the template
+using `custom_mobile_image_url` (Shopify CDN) and `custom_shopify_product_id`.
+
+Run `npm run setup:erp` before deploying this API. It adds **Mobile App Habit
+Tracker Item** and the **Habit Tracker** tab/table on **Mobile App User**.
+`PUT /v1/habit-tracker` accepts `{data,revision,date}` from the preceding GET.
+The backend resolves account and patient, validates purchased products and the
+current India date, preserves historical entries, computes streaks and saves the
+payload on the verified user's child row. App and patient separate rows. Parent
+`modified` and row revision reject concurrent overwrites, preserving other tabs.
+Legacy Siya habit history is read as the initial state and retained on first save;
+its original Siya Mobile Record is never deleted. Seedfit does not inherit it.
+The legacy approved-plan reward contract is retained; no client-provided reward
+codes or streak values are trusted. The existing n8n coupon flow is unchanged.
+
+Item `custom_mobile_habit_frequency` selects the existing onceDaily, twiceDaily
+or twiceWeekly checkbox pattern; `custom_mobile_habit_id` optionally retains an
+exact prior app habit identity. Blank frequency means as-directed logging with a
+single check-in, not an inferred medication dosage. Only transfer known existing
+patterns; do not infer new instructions from a product name or disease.
+
+`GET /v1/habit-prescriptions` returns actual drug prescription rows from the
+linked patient's non-cancelled encounters (including the existing Ayurveda,
+allopathy and homeopathy tables). Empty appointment encounters are omitted.
+The original prescription layout displays the clinic's data and hides the entry
+when absent. It does not manufacture a doctor, diagnosis, duration or expiry from
+a purchase. The standalone backend repository needs these same source/schema
+changes; pushing the app alone does not deploy its API.

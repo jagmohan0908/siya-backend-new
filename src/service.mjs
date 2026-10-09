@@ -5,6 +5,9 @@ import {isPerfectDay} from './habits.mjs';
 import {orderDetails, trackingSummary} from './order-details.mjs';
 import {patientDiets, dietPdf} from './diets.mjs';
 import {Assessments, assessmentApp} from './assessments.mjs';
+import {habitOrders, habitPrescriptions} from './invoice-habits.mjs';
+import {invoiceKit} from './invoice-kit.mjs';
+import {getErpHabitTracker,saveErpHabitTracker} from './erp-habit-tracker.mjs';
 
 const day = () => new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit'}).format(new Date());
 const statuses = {Pending: 'pending', Approved: 'confirmed', Confirmed: 'confirmed', 'Checked In': 'checked_in', Completed: 'completed', Cancelled: 'cancelled'};
@@ -481,7 +484,8 @@ export class MobileService {
           identity.customers?.includes(doc.customer)), 'Order not found',404);
         const shipment = row.type === 'Sales Invoice' ? await this.invoiceShipment(doc) : null;
         return orderDetails({...doc,doctype:row.type},patient,this.productImage,
-          row.type === 'Sales Invoice' ? trackingSummary(doc,shipment) : null);
+          row.type === 'Sales Invoice' ? trackingSummary(doc,shipment) : null,
+          await invoiceKit(this.erp,doc,this.productImage));
       })));
     }
     return {items:items.sort((a,b)=>String(b.date).localeCompare(String(a.date))),
@@ -514,7 +518,7 @@ export class MobileService {
     const {invoice,patient} = await this.ownedInvoice(user,id);
     if (pdf) return this.erp.request(`/api/method/frappe.utils.print_format.download_pdf?${new URLSearchParams({doctype:'Sales Invoice',name:id,format:'Standard',no_letterhead:'0'})}`, {raw:true});
     return orderDetails({...invoice,doctype:'Sales Invoice'},patient,this.productImage,
-      trackingSummary(invoice,await this.invoiceShipment(invoice)));
+      trackingSummary(invoice,await this.invoiceShipment(invoice)),await invoiceKit(this.erp,invoice,this.productImage));
   }
   async refreshInvoiceTracking(user, id) {
     // Authorize before querying tracking or triggering a carrier refresh.
@@ -589,6 +593,10 @@ export class MobileService {
   async habits(user) {
     return await this.records.read(user.id,'habits','self') || {data:null,revision:0};
   }
+  habitOrders(user,appId,offset) { return habitOrders(this,user,appId,offset); }
+  erpHabitTracker(user,appId) { return getErpHabitTracker(this,user,appId); }
+  saveErpHabitTracker(user,body,appId) { return saveErpHabitTracker(this,user,body,appId); }
+  habitPrescriptions(user,appId) { return habitPrescriptions(this,user,appId); }
   async saveHabits(user, body) {
     const incoming = object(body.data); const old = await this.habits(user);
     requireValue(body.revision === old.revision,'Habits changed on another device. Refresh and try again.',409,'revision_conflict');
