@@ -420,6 +420,9 @@ Shopify still supplies catalogue images, purchases and discount issuance.
 `kit.name` in order responses resolves the invoice's Item Group Template, not its
 internal ID. Kit image and reorder destination may be configured on the template
 using `custom_mobile_image_url` (Shopify CDN) and `custom_shopify_product_id`.
+Single-product invoices also return `items[].shopifyProductId`, matched by unique
+Shopify SKU or exact product title using the shared catalogue cache. Order Again
+opens that product in the app; ambiguous or unavailable matches show a message.
 
 Run `npm run setup:erp` before deploying this API. It adds **Mobile App Habit
 Tracker Item** and the **Habit Tracker** tab/table on **Mobile App User**.

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createProductImages} from '../src/product-images.mjs';
+import {createProductImages,createProductCatalog} from '../src/product-images.mjs';
 import {orderDetails} from '../src/order-details.mjs';
 
 test('Shopify images match invoice SKU, share catalogue requests and preserve ERP prices',async()=>{
@@ -38,4 +38,24 @@ test('Shopify failure leaves the ERP invoice available without a fabricated imag
   assert.equal(await image({item_code:'SKU'}),'');
   const result=await orderDetails({patient:'different',items:[]},{name:'current',patient_name:'Wrong patient',mobile:'123'},image);
   assert.equal(result.patient.name,'');assert.equal(result.patient.phone,'');assert.equal(result.patient.id,'different');
+});
+
+
+test('reorder IDs use the exact SKU or unique title match and reject ambiguous matches',async()=>{
+  let calls=0;
+  const lookup=createProductCatalog({domain:'test.myshopify.com',storefrontToken:'test',fetcher:async()=>{
+    calls++;
+    return Response.json({data:{products:{nodes:[
+      {id:'gid://shopify/Product/123',title:'Cream',variants:{nodes:[{sku:'CREAM-SKU'}]}},
+      {id:'gid://shopify/Product/456',title:'Wash',variants:{nodes:[{sku:'DUP'}]}},
+      {id:'gid://shopify/Product/789',title:'Duplicate wash',variants:{nodes:[{sku:'DUP'}]}},
+      {id:'gid://shopify/Product/999',title:'Cream',variants:{nodes:[]}},
+    ],pageInfo:{hasNextPage:false}}}});
+  }});
+  assert.equal((await lookup({item_code:'CREAM-SKU',item_name:'Wash'})).shopifyProductId,'gid://shopify/Product/123');
+  assert.equal((await lookup({item_name:'Wash'})).shopifyProductId,'gid://shopify/Product/456');
+  assert.equal((await lookup({item_code:'DUP',item_name:'Wash'})).shopifyProductId,'');
+  assert.equal((await lookup({item_name:'Cream'})).shopifyProductId,'');
+  assert.equal((await lookup({item_code:'MISSING'})).shopifyProductId,'');
+  assert.equal(calls,1);
 });

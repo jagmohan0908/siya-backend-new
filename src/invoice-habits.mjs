@@ -39,11 +39,14 @@ async function invoiceItems(service,doc) {
       if(item && Number.isFinite(Number(row.qty))) item.returned+=stockQuantity(row)/item.factor;
     }
   }
-  return Promise.all([...quantities.values()].map(async ({row,quantity,returned})=>({
+  return Promise.all([...quantities.values()].map(async ({row,quantity,returned})=>{
+    const product=service.productCatalog ? await service.productCatalog(row) :
+      {imageUrl:await service.productImage(row),shopifyProductId:''};
+    return {
     id:row.item_code,code:row.item_code,name:row.item_name || row.item_code,
     quantity,remainingQuantity:Math.max(0,quantity-returned),unit:row.uom || '',
-    canTrack:quantity>returned,imageUrl:await service.productImage(row),
-  })));
+    canTrack:quantity>returned,imageUrl:product.imageUrl,shopifyProductId:product.shopifyProductId,
+  };}));
 }
 
 async function summary(service,doc) {

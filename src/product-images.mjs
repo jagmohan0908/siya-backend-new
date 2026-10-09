@@ -1,6 +1,12 @@
-// Shopify supplies catalogue images only; invoice quantities and prices stay in ERP.
-export function createProductImages({domain, storefrontToken, version = '2026-07', fetcher = fetch}) {
-  if (!domain || !storefrontToken) return async () => '';
+// Shopify supplies catalogue images and reorder IDs; quantities and prices stay in ERP.
+export function createProductImages(options) {
+  const lookup=createProductCatalog(options);
+  return async item=>(await lookup(item)).imageUrl;
+}
+
+export function createProductCatalog({domain, storefrontToken, version = '2026-07', fetcher = fetch}) {
+  const empty=()=>({imageUrl:'',shopifyProductId:''});
+  if (!domain || !storefrontToken) return async () => empty();
   let catalog = [], expires = 0, pending;
   const normalize = value => String(value || '').trim().toLowerCase();
   const safeImage = value => {
@@ -16,7 +22,7 @@ export function createProductImages({domain, storefrontToken, version = '2026-07
         const response = await fetcher(`https://${domain}/api/${version}/graphql.json`, {
           method:'POST', headers:{'Content-Type':'application/json','X-Shopify-Storefront-Access-Token':storefrontToken},
           body:JSON.stringify({query:`query InvoiceImages($after: String) {
-            products(first: 100, after: $after) { nodes { title featuredImage { url }
+            products(first: 100, after: $after) { nodes { id title featuredImage { url }
               variants(first: 100) { nodes { sku image { url } } }
             } pageInfo { hasNextPage endCursor } }
           }`,variables:{after}}), signal:AbortSignal.timeout(10000),redirect:'error',
@@ -41,10 +47,12 @@ export function createProductImages({domain, storefrontToken, version = '2026-07
     const code = normalize(item.item_code);
     const matches = products.flatMap(p => (p.variants?.nodes || [])
       .filter(v => code && normalize(v.sku) === code)
-      .map(v => safeImage(v.image?.url || p.featuredImage?.url)));
+      .map(v => ({imageUrl:safeImage(v.image?.url || p.featuredImage?.url),
+        shopifyProductId:/^gid:\/\/shopify\/Product\/\d+$/.test(p.id || '') ? p.id : ''})));
     if (matches.length === 1) return matches[0];
-    if (matches.length > 1) return ''; // Ambiguous SKUs need catalogue correction.
+    if (matches.length > 1) return empty(); // Ambiguous SKUs need catalogue correction.
     const titles = products.filter(p => normalize(p.title) === normalize(item.item_name));
-    return titles.length === 1 ? safeImage(titles[0].featuredImage?.url) : '';
+    return titles.length === 1 ? {imageUrl:safeImage(titles[0].featuredImage?.url),
+      shopifyProductId:/^gid:\/\/shopify\/Product\/\d+$/.test(titles[0].id || '') ? titles[0].id : ''} : empty();
   };
 }

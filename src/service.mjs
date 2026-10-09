@@ -22,9 +22,9 @@ const doctorTag = appId => {
 };
 
 export class MobileService {
-  constructor({erp, webhookUrl, webhookSecret, fetcher = fetch, rewardIssuer, payments, productImage = async () => '',
+  constructor({erp, webhookUrl, webhookSecret, fetcher = fetch, rewardIssuer, payments, productImage = async () => '', productCatalog,
     s3PresignMethod = 'sriaas_clinic.api.s3.presign.get_presigned_url'}) {
-    Object.assign(this, {erp, webhookUrl, webhookSecret, fetcher, rewardIssuer, payments, productImage, s3PresignMethod});
+    Object.assign(this, {erp, webhookUrl, webhookSecret, fetcher, rewardIssuer, payments, productImage, productCatalog, s3PresignMethod});
     this.records = new Records(erp); this.queue = new SerialQueue();
     this.assessments = new Assessments(erp);
   }

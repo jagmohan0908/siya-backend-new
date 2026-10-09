@@ -215,3 +215,17 @@ test('HTTP tracker routes enforce authentication and carry app-scoped revisions'
     assert.equal((await fetch(`${url}/v1/habit-prescriptions`,options)).status,200);
   } finally { await new Promise(resolve=>server.close(resolve)); }
 });
+
+
+test('single-product habit purchases carry the matched Shopify reorder product ID',async()=>{
+  const {erp,service,invoice}=setup();
+  erp.add('Sales Invoice',{...invoice,items:[invoice.items[0]]});
+  service.productCatalog=async item=>{
+    assert.equal(item.item_code,'CREAM');
+    return {imageUrl:'https://cdn.shopify.com/cream.jpg',shopifyProductId:'gid://shopify/Product/123'};
+  };
+  const tracker=await service.erpHabitTracker(user,app);
+  assert.equal(tracker.orders[0].kit,null);
+  assert.equal(tracker.orders[0].items[0].shopifyProductId,'gid://shopify/Product/123');
+  assert.equal(tracker.orders[0].items[0].imageUrl,'https://cdn.shopify.com/cream.jpg');
+});
