@@ -18,12 +18,19 @@ class Erp {
   }
   async create(type,doc) { const result={...doc,name:doc.record_key}; this.add(type,result); return result; }
   async update(type,name,fields) { const result={...await this.get(type,name),...fields}; this.add(type,result); return result; }
-  async list(type,filters,fields,{offset=0,limit=50,orFilters}={}) {
+  async list(type,filters,fields,{offset=0,limit=50,orFilters,order=''}={}) {
     const match=(doc,key,op,value)=> op==='in' ? value.includes(doc[key]) : op==='<' ? doc[key]<value : doc[key]===value;
     return [...this.docs.entries()].filter(([key])=>key.startsWith(`${type}/`)).map(([,doc])=>doc)
       .filter(doc=>Object.entries(filters).every(([key,value])=>Array.isArray(value)?match(doc,key,...value):doc[key]===value))
       .filter(doc=>!orFilters || orFilters.some(([key,op,value])=>match(doc,key,op,value)))
-      .slice(offset,offset+limit).map(doc=>structuredClone(doc));
+      .sort((a,b)=>{
+        for(const part of order.split(',')) {
+          const [field,direction]=part.trim().split(/\s+/);
+          const result=String(a[field] || '').localeCompare(String(b[field] || ''));
+          if(result) return direction==='desc'?-result:result;
+        }
+        return 0;
+      }).slice(offset,offset+limit).map(doc=>structuredClone(doc));
   }
 }
 function setup() {
@@ -58,14 +65,37 @@ test('invoice kit title comes from its template and items from the submitted inv
   assert.deepEqual(detail.items.map(i=>i.code),['CREAM','WASH']);
 });
 
-test('all orders are loaded, including single items, while repeated products share one checklist entry',async()=>{
+test('only the latest purchase supplies habits while invoice pagination stays available',async()=>{
   const {erp,service,invoice}=setup();
   for(let i=2;i<=25;i++) erp.add('Sales Invoice',{...invoice,name:`INV/${i}`});
+  erp.add('Sales Invoice',{...invoice,name:'LATEST',posting_date:'2026-10-09',items:[invoice.items[1]]});
   const first=await service.habitOrders(user,app,0);
   assert.equal(first.items.length,20);assert.equal(first.nextCursor,20);
   const tracker=await service.erpHabitTracker(user,app);
-  assert.equal(tracker.orders.length,25);assert.equal(tracker.data.habits.length,2);
+  assert.equal(tracker.orders.length,1);assert.equal(tracker.orders[0].id,'LATEST');
+  assert.equal(tracker.orders[0].kit,null);
+  assert.deepEqual(tracker.data.habits.map(h=>h.id),['erp:WASH']);
+  await assert.rejects(service.saveErpHabitTracker(user,{date:tracker.today,revision:0,
+    data:changes(tracker.data)},app),{status:400});
   await assert.rejects(service.habitOrders(user,app,-1),{status:400});
+});
+
+test('same-day purchases use creation time and retain past check-ins',async()=>{
+  const {erp,service,invoice}=setup();
+  erp.add('Sales Invoice',{...invoice,name:'ZZ-OLD',creation:'2026-10-08 09:00:00'});
+  erp.add('Sales Invoice',{...invoice,name:'AA-NEW',creation:'2026-10-08 11:00:00',items:[invoice.items[1]]});
+  await service.records.write(user.id,'habits','self',{
+    dailyCompliance:{'2020-01-01':{completedHabits:{vitiligo_cream:true}}}},0);
+  const tracker=await service.erpHabitTracker(user,app);
+  assert.equal(tracker.orders[0].id,'AA-NEW');
+  assert.equal(tracker.data.dailyCompliance['2020-01-01'].completedHabits.vitiligo_cream,true);
+});
+
+test('latest authorized purchase is found beyond another patient shared-customer invoices',async()=>{
+  const {erp,service,invoice}=setup();
+  for(let i=0;i<23;i++) erp.add('Sales Invoice',{...invoice,name:`OTHER/${i}`,patient:'PAT-B',posting_date:'2026-10-09'});
+  const tracker=await service.erpHabitTracker(user,app);
+  assert.deepEqual(tracker.orders.map(o=>o.id),['INV/1']);
 });
 
 const changes=(data,done=true)=>({...data,dailyCompliance:{...data.dailyCompliance,

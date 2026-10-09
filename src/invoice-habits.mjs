@@ -52,22 +52,24 @@ async function summary(service,doc) {
     items:await invoiceItems(service,doc)};
 }
 
-export async function habitOrders(service,user,appId,offset=0) {
+export async function habitOrders(service,user,appId,offset=0,latestOnly=false) {
   assessmentApp(appId);
   requireValue(Number.isSafeInteger(offset) && offset>=0 && offset<=100000,'Invalid cursor');
   const patient=await service.patient(user);
   const identity=await service.identity(user);
   const rows=await service.erp.list('Sales Invoice',
     identity.customers?.length ? {docstatus:1,is_return:0} : {patient:patient.name,docstatus:1,is_return:0},
-    ['name'],{offset,limit:21,order:'posting_date desc, name desc',
+    ['name'],{offset,limit:21,order:'posting_date desc, creation desc, name desc',
       ...(identity.customers?.length ? {orFilters:[['patient','=',patient.name],['customer','in',identity.customers]]} : {})});
   const items=[];
-  for(let i=0;i<Math.min(rows.length,20);i+=4) {
-    const batch=await Promise.all(rows.slice(i,Math.min(i+4,20)).map(async row=>{
+  const batchSize=latestOnly?1:4;
+  for(let i=0;i<Math.min(rows.length,20);i+=batchSize) {
+    const batch=await Promise.all(rows.slice(i,Math.min(i+batchSize,20)).map(async row=>{
       const doc=await service.erp.get('Sales Invoice',row.name);
       return doc.docstatus===1 && !doc.is_return && owns(doc,patient,identity) ? summary(service,doc) : null;
     }));
     items.push(...batch.filter(Boolean));
+    if(latestOnly && items.length) break;
   }
   return {items,nextCursor:rows.length>20?offset+20:null};
 }

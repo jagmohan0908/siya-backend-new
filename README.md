@@ -410,8 +410,9 @@ non-return invoices, their Item Group Template display names, and their actual
 invoice items. Unpaid submitted invoices qualify. Draft/cancelled invoices do not.
 Credit notes linked through `return_against` remove fully returned products from
 check-ins. Shared billing customers never expose another named patient's habits.
-All invoice pages are loaded; a product bought in multiple orders appears once in
-the combined checklist. Kit and single-product purchases both qualify.
+Only the latest qualifying invoice supplies the tracker and checklist (posting date,
+then creation time). Kit and single-product purchases both qualify. Earlier
+check-in history is retained, and Orders & invoices still lists all purchases.
 
 The app retains its existing home, checklist, progress, reminders, coins and
 purchase navigation. It no longer checks Shopify orders to unlock these screens.

@@ -22,9 +22,9 @@ async function purchases(service,user,appId) {
   const orders=[];
   let cursor=0;
   do {
-    const page=await habitOrders(service,user,appId,cursor);
+    const page=await habitOrders(service,user,appId,cursor,true);
     orders.push(...page.items);cursor=page.nextCursor;
-  } while(cursor!=null);
+  } while(!orders.length && cursor!=null);
   const items=new Map();
   for(const order of orders) for(const product of order.items) {
     if(items.has(product.code)) continue;
