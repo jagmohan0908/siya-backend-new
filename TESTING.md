@@ -85,3 +85,19 @@ provider credentials and made no external provider requests.
 
 The existing ERP app source and production app configuration were not changed.
 The new custom DocType and synthetic/asset records were added only to dev ERP.
+
+## Shared app assessments - 9 October 2026
+
+- Backend suite: 81 tests passed, including app/account separation, legacy
+  migration, immutable retries, invalid app rejection and HTTP route selection.
+- Local ERP through the configured ngrok tunnel: created Mobile App Assessment
+  with the App selector; migrated one legacy assessment as Siya Ayurveda.
+  Compared its entire saved payload and revision; original record retained.
+- Live synthetic tests used the same assessment ID/account across both apps,
+  verified separate histories and another account's empty history, and verified
+  retries preserve the original submission. Both synthetic records were deleted
+  and their absence verified.
+- A private legacy backup was written to the operator's OS temporary directory
+  before ERP changes. No assessment answers or backup are included in Git.
+- No Flutter changes or APK installation were needed. Seedfit device login and
+  the deployed Render-to-device flow were not tested in this check.

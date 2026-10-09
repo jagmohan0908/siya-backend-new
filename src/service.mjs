@@ -4,6 +4,7 @@ import {Records, SerialQueue, recordName} from './store.mjs';
 import {isPerfectDay} from './habits.mjs';
 import {orderDetails, trackingSummary} from './order-details.mjs';
 import {patientDiets, dietPdf} from './diets.mjs';
+import {Assessments, assessmentApp} from './assessments.mjs';
 
 const day = () => new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit'}).format(new Date());
 const statuses = {Pending: 'pending', Approved: 'confirmed', Confirmed: 'confirmed', 'Checked In': 'checked_in', Completed: 'completed', Cancelled: 'cancelled'};
@@ -22,6 +23,7 @@ export class MobileService {
     s3PresignMethod = 'sriaas_clinic.api.s3.presign.get_presigned_url'}) {
     Object.assign(this, {erp, webhookUrl, webhookSecret, fetcher, rewardIssuer, payments, productImage, s3PresignMethod});
     this.records = new Records(erp); this.queue = new SerialQueue();
+    this.assessments = new Assessments(erp);
   }
   async identity(user) {
     let record = await this.records.read(user.id, 'identity', 'self');
@@ -432,14 +434,20 @@ export class MobileService {
     },request.revision);
     return completed.data;
   }
-  async treatment(user, body) {
+  async treatments(user, appId = 'siya-ayurveda') {
+    assessmentApp(appId);
+    return {items:await this.assessments.list(user.id,appId)};
+  }
+  async treatment(user, body, appId = 'siya-ayurveda') {
+    assessmentApp(appId);
     const id = text(body.id, 100); object(body.answers);
     requireValue(/^[a-zA-Z0-9-]{16,100}$/.test(id), 'Invalid assessment ID');
-    const prior = await this.records.read(user.id, 'treatment', id);
+    await this.assessments.migrateLegacy(user.id,appId);
+    const prior = await this.assessments.read(user.id,appId,id);
     if (prior) return prior;
     const identity = await this.identity(user);
-    return this.records.write(user.id, 'treatment', id, {id, patient: identity.patient, questionnaireVersion: text(body.questionnaireVersion, 100),
-      answers: body.answers, result: body.result || {}, createdAt: new Date().toISOString()}, 0);
+    return this.assessments.create(user.id,appId,{id, patient: identity.patient, questionnaireVersion: text(body.questionnaireVersion, 100),
+      answers: body.answers, result: body.result || {}, createdAt: new Date().toISOString()});
   }
   async patient(user) {
     const {patient} = await this.identity(user);

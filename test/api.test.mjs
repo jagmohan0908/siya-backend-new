@@ -233,6 +233,73 @@ test('treatment retries preserve the original assessment',async () => {
   await service.treatment(user,body); const saved=await service.treatment(user,{...body,answers:{a:'second'}});
   assert.equal(saved.data.answers.a,'first');
 });
+
+test('assessment history and idempotency are scoped by both account and app',async()=>{
+  const {service,erp}=setup();
+  const body={id:booking.id,questionnaireVersion:'v1',answers:{selected_disease:'hair',answer:'siya'}};
+  await service.treatment(user,body,'siya-ayurveda');
+  await service.treatment(user,{...body,answers:{answer:'seedfit'}},'seedfit');
+  await service.treatment({...user,id:'other-account'},body,'seedfit');
+  const siya=await service.treatments(user,'siya-ayurveda');
+  const seedfit=await service.treatments(user,'seedfit');
+  assert.equal(siya.items.length,1);assert.equal(seedfit.items.length,1);
+  assert.equal(siya.items[0].data.answers.answer,'siya');
+  assert.equal(seedfit.items[0].data.answers.answer,'seedfit');
+  assert.equal(seedfit.items[0].data.appId,'seedfit');
+  const repeat=await service.treatment(user,{...body,answers:{answer:'changed'}},'seedfit');
+  assert.equal(repeat.data.answers.answer,'seedfit');
+  assert.equal(erp.created.filter(d=>d.type==='Mobile App Assessment').length,3);
+  assert.equal(erp.created.filter(d=>d.kind==='treatment').length,0);
+});
+
+test('legacy assessments migrate to their app once without deleting original data',async()=>{
+  const {service,erp}=setup();
+  const legacy={id:booking.id,questionnaireVersion:'legacy',answers:{a:'original'},result:{title:'Saved'},createdAt:'2026-10-08T10:00:00Z'};
+  await service.records.write(user.id,'treatment',booking.id,legacy,0);
+  await service.records.write(user.id,'treatment','other-legacy-id-123',{...legacy,id:'other-legacy-id-123',appId:'seedfit'},0);
+  const seedfit=await service.treatments(user,'seedfit');
+  assert.equal(seedfit.items.length,1);assert.equal(seedfit.items[0].data.id,'other-legacy-id-123');
+  const siya=await service.treatments(user,'siya-ayurveda');
+  assert.equal(siya.items.length,1);
+  assert.deepEqual(siya.items[0].data,{...legacy,appId:'siya-ayurveda'});
+  await service.treatments(user,'siya-ayurveda');
+  const retry=await service.treatment(user,{...legacy,answers:{a:'changed'}},'siya-ayurveda');
+  assert.equal(retry.data.answers.a,'original');
+  assert.equal(erp.created.filter(d=>d.type==='Mobile App Assessment').length,2);
+  assert.deepEqual((await service.records.read(user.id,'treatment',booking.id)).data,legacy);
+});
+
+test('unknown app IDs cannot read or write assessments',async()=>{
+  const {service,erp}=setup();
+  for (const appId of ['', 'unknown','Seedfit']) {
+    await assert.rejects(service.treatments(user,appId),{code:'invalid_app'});
+    await assert.rejects(service.treatment(user,{id:booking.id,answers:{}},appId),{code:'invalid_app'});
+  }
+  assert.equal(erp.created.length,0);
+});
+
+test('assessment decode rejects incorrectly scoped ERP results',async()=>{
+  const {service,erp}=setup();
+  await service.treatment(user,{id:booking.id,questionnaireVersion:'v1',answers:{}},'seedfit');
+  const list=erp.list.bind(erp);
+  erp.list=(type,filters,...args)=>type==='Mobile App Assessment'
+    ? list(type,{},...args):list(type,filters,...args);
+  await assert.rejects(service.treatments(user,'siya-ayurveda'),{status:404});
+});
+
+test('treatment API routes carry the app selector for both writes and history',async t=>{
+  const {service}=setup();
+  const server=createApi({service,authenticate:async()=>user});
+  await new Promise(r=>server.listen(0,'127.0.0.1',r));
+  t.after(()=>new Promise(r=>server.close(r)));
+  const base=`http://127.0.0.1:${server.address().port}/v1/treatments`;
+  const response=await fetch(`${base}?app=seedfit`,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({id:booking.id,questionnaireVersion:'v1',answers:{},appId:'siya-ayurveda'})});
+  assert.equal(response.status,200);assert.equal((await response.json()).data.appId,'seedfit');
+  assert.equal((await (await fetch(`${base}?app=seedfit`)).json()).items.length,1);
+  assert.equal((await (await fetch(base)).json()).items.length,0);
+  assert.equal((await fetch(`${base}?app=unknown`)).status,400);
+});
 test('client-supplied streaks and rewards are ignored',async () => {
   const {service}=setup();const result=await service.saveHabits(user,{revision:0,data:{habits:[{id:'h'}],dailyCompliance:{},currentStreak:999,rewards:[{couponCode:'FORGED'}]}});
   assert.equal(result.data.currentStreak,0);assert.deepEqual(result.data.rewards,[]);

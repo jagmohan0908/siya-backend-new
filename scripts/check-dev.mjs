@@ -14,6 +14,7 @@ const date = new Date(Date.now()+86400000).toISOString().slice(0,10);
 const slots = await erp.method('mobile_app.api.practitioners.availability',{practitioner_id:doctors.doctors[0].id,date});
 assert.ok(Array.isArray(slots.slots));console.log('PASS ERP availability');
 await erp.get('DocType','Siya Mobile Record');console.log('PASS additive mobile record schema');
+await erp.get('DocType','Mobile App Assessment');console.log('PASS app assessment schema');
 if (process.env.DEV_TEST_WRITES === '1') {
   const records = new Records(erp);const account=`integration-test:${randomUUID()}`;
   const name=recordName(account,'smoke','self');

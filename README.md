@@ -69,8 +69,8 @@ npm run setup:erp
 npm start
 ```
 
-`setup:erp` adds one custom DocType, **Siya Mobile Record**, restricted to System
-Manager. It never changes existing ERP DocTypes or app source. Before production,
+`setup:erp` adds **Siya Mobile Record** and **Mobile App Assessment**, restricted
+to System Manager. It never changes existing ERP DocTypes or app source. Before production,
 use a dedicated integration user with only the required ERP permissions.
 
 Run behind TLS, with one service process during the staged rollout. Restrict web
@@ -277,7 +277,7 @@ then `npm run check:dev`. The smoke check allows the original dev host and this
 specific ngrok host; writes still require `DEV_TEST_WRITES=1` explicitly.
 The local account needs access to Healthcare Practitioner, Practitioner Schedule,
 Patient Appointment, Doctor Availability Exception, Mobile App User, Mobile App
-Appointment, Clinic Appointment, Siya Mobile Record, Patient, Patient Encounter,
+Appointment, Clinic Appointment, Siya Mobile Record, Mobile App Assessment, Patient, Patient Encounter,
 Diet Chart, Sales Invoice, Sales Order, File, and the configured S3 signing method.
 Existing doctypes retain their ERP permissions; the backend never bypasses them.
 
@@ -329,9 +329,39 @@ For Flutter, set `MOBILE_APP_ID` at build time alongside `MOBILE_API_BASE_URL`:
 
 Choose one ID for each build. This repository defaults to Siya Ayurveda. A
 separate Seedfit client must send `app=seedfit` on doctor/slot/booking/order
-requests and use returned photo URLs. Seedfit login configuration is separate
+requests and assessment requests, and use returned photo URLs. Seedfit login configuration is separate
 from this catalogue filter; the backend's existing Shopify authentication remains
 unchanged and must match the store used by that client.
+
+## Assessments for Siya Ayurveda and Seedfit
+
+`POST /v1/treatments` and `GET /v1/treatments` use **Mobile App Assessment**.
+The required ERP **App** field is `Siya Ayurveda` or `Seedfit`. Each record also
+contains the verified customer account, optional linked Patient, assessment ID,
+questionnaire version, concern, submitted time, answers and result. The API keeps
+its existing response shape, so the current Flutter history screen still works.
+
+Send `?app=siya-ayurveda` or `?app=seedfit` on both routes. Omitted app IDs default
+to Siya Ayurveda for existing clients; unknown/empty IDs are rejected. Flutter
+already sends its `MOBILE_APP_ID`. Records and retry keys include both the verified
+account and app. A retry returns the original submission without overwriting it.
+The app selector separates histories; it is not a separate authentication tenant.
+Shopify authentication remains unchanged, and Seedfit must use a compatible login.
+
+Before deploying these routes against an existing ERP, run from the backend folder:
+
+```powershell
+npm run migrate:assessments
+```
+
+This writes a backup to the OS temporary directory before creating the schema and
+copying legacy `Siya Mobile Record` treatment records. Keep that private backup out
+of Git. Unlabeled historical assessments belong to Siya Ayurveda; explicitly
+labeled Seedfit assessments retain their app. Answers, results, submission times
+and revisions are preserved, and originals remain available through **Original
+Mobile Record**. Re-running does not duplicate records. Reads and submissions also
+migrate scoped legacy records to cover writes from older backend versions during
+rollout. New submissions are stored only in **Mobile App Assessment**.
 
 ## Order details, product images and tracking
 

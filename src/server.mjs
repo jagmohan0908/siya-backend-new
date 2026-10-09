@@ -56,8 +56,8 @@ export function createApi({service, authenticate, origins = [], allowBookings = 
             return service.createAppointment(user,body,route.endsWith('/appointment-orders'),appId);
           }
           if (req.method === 'POST' && parts[1] === 'appointments' && parts[3] === 'requests') return service.appointmentChange(user,parts[2],body);
-          if (route === 'GET /v1/treatments') return {items:await service.records.list(user.id,'treatment')};
-          if (route === 'POST /v1/treatments') return service.treatment(user,body);
+          if (route === 'GET /v1/treatments') return service.treatments(user,appId);
+          if (route === 'POST /v1/treatments') return service.treatment(user,body,appId);
           if (route === 'GET /v1/diets') return service.diets(user);
           if (req.method === 'GET' && parts[0] === 'v1' && parts[1] === 'diets' && parts.length === 4 && parts[3] === 'pdf') return service.dietPdf(user,parts[2]);
           if (route === 'GET /v1/habits') return service.habits(user);
