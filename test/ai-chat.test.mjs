@@ -29,6 +29,18 @@ test('message retries retain IDs, with separate namespaces for each owner/app/co
  await assert.rejects(chat.call(user,app,'send_message',{...body,message:' '}),{status:400});
  await assert.rejects(chat.call(user,app,'send_message',{...body,message:'a'.repeat(4001)}),{status:400});
 });
+test('new chat derives owner and app, requires previous conversation and accepts only a fresh ID',async()=>{
+ const {service,chat}=setup();
+ await assert.rejects(chat.call(user,app,'new_session',{}),{status:400});
+ await assert.rejects(chat.call(user,app,'new_session',{conversation:'1'}),{status:502});
+ service.erp.method=async(name,args,write)=>{
+  assert.equal(name,'sriaas_clinic.api.mobile_app_ai.new_session');
+  assert.deepEqual(args,{external_id:'erp-verified-customer',app_id:app,conversation:'1'});
+  assert.equal(write,true);
+  return {success:true,data:{conversation_id:'new',messages:[]}};
+ };
+ assert.equal((await chat.call(user,app,'new_session',{conversation:'1',external_id:'attacker'})).data.conversation_id,'new');
+});
 test('polling and escalation use scoped ERP methods; failures are not reported as sent',async()=>{
  const {service,chat,calls}=setup();
  await chat.call(user,app,'get_messages',{conversation:'1',after:'2',limit:999});
@@ -41,18 +53,24 @@ test('polling and escalation use scoped ERP methods; failures are not reported a
  service.erp.method=async()=>{throw new ApiError(503,'erp_unavailable','ERP unavailable');};
  await assert.rejects(chat.call(user,app,'open_session'),{status:503});
 });
-test('all four HTTP AI routes require authentication',async()=>{
+test('all five HTTP AI routes require authentication',async()=>{
  const {service,calls}=setup();
+ const originalMethod=service.erp.method;
+ service.erp.method=async(name,args,write)=>{
+  const result=await originalMethod(name,args,write);
+  if(name.endsWith('.new_session'))result.data.conversation_id='fresh';
+  return result;
+ };
  const server=createApi({service,authenticate:async token=>{if(token!=='Bearer test')throw new ApiError(401,'unauthenticated','Login required');return user;}});
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
  const base=`http://127.0.0.1:${server.address().port}`;
  try {
-  for(const [method,path,body] of [['POST','session',{}],['GET','messages?conversation=1',null],['POST','messages',{conversation:'1',message:'Hello',client_message_id:'id'}],['POST','escalate',{conversation:'1'}]]) {
+  for(const [method,path,body] of [['POST','session',{}],['POST','new-session',{conversation:'1'}],['GET','messages?conversation=1',null],['POST','messages',{conversation:'1',message:'Hello',client_message_id:'id'}],['POST','escalate',{conversation:'1'}]]) {
    const options={method,headers:{'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})};
    assert.equal((await fetch(`${base}/v1/ai-chat/${path}`,options)).status,401);
    options.headers.Authorization='Bearer test';
    assert.equal((await fetch(`${base}/v1/ai-chat/${path}`,options)).status,200);
   }
-  assert.equal(calls.length,4);
+  assert.equal(calls.length,5);
  } finally {await new Promise(resolve=>server.close(resolve));}
 });

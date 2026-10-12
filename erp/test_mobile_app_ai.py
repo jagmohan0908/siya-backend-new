@@ -53,6 +53,25 @@ class BridgeTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self.api.get_messages("user", "seedfit", "foreign")
 
+    def test_new_chat_checks_owner_before_any_write(self):
+        self.transport._assert_conversation_owner.side_effect = PermissionError("Not owned")
+        with self.assertRaises(PermissionError):
+            self.api.new_session("user", "seedfit", "foreign")
+        self.frappe.get_doc.assert_not_called()
+        self.frappe.db.commit.assert_not_called()
+
+    def test_new_chat_retry_reuses_existing_successor(self):
+        old, fresh = SimpleNamespace(name="old"), SimpleNamespace(name="fresh")
+        context = {"account": "Siya", "patient": None}
+        self.transport._resolve_context.return_value = context
+        self.transport._assert_conversation_owner.side_effect = [old, fresh]
+        self.frappe.db.get_value.side_effect = ["old", "fresh", 1]
+        self.transport._session_payload.return_value = {"conversation_id": "fresh", "messages": []}
+        result = self.api.new_session("user", "siya-ayurveda", "old")
+        self.assertEqual(result["data"]["conversation_id"], "fresh")
+        self.frappe.get_doc.assert_not_called()
+        self.transport._assert_conversation_owner.assert_any_call("fresh", context)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,7 +6,7 @@ export class AiChat {
   constructor(service) { this.service=service; }
   async call(user,appId,action,body={}) {
     assessmentApp(appId);
-    requireValue(['open_session','get_messages','send_message','escalate'].includes(action),'Invalid AI action');
+    requireValue(['open_session','new_session','get_messages','send_message','escalate'].includes(action),'Invalid AI action');
     const identity=await this.service.identity(user);
     const args={external_id:identity.erpUser,app_id:appId};
     if(action!=='open_session') {
@@ -24,8 +24,9 @@ export class AiChat {
     const result=await this.service.erp.method(`sriaas_clinic.api.mobile_app_ai.${action}`,args,action!=='get_messages');
     requireValue(result?.success===true && result.data,'AI chat is temporarily unavailable. Please try again.',502);
     const data=result.data;
-    if(action==='open_session') requireValue(data.conversation_id,'AI conversation could not be opened',502);
-    if(args.conversation && data.conversation_id) requireValue(data.conversation_id===args.conversation,'Unexpected AI conversation',502);
+    if(['open_session','new_session'].includes(action)) requireValue(data.conversation_id,'AI conversation could not be opened',502);
+    if(action==='new_session') requireValue(data.conversation_id!==args.conversation,'New chat could not be started',502);
+    else if(args.conversation && data.conversation_id) requireValue(data.conversation_id===args.conversation,'Unexpected AI conversation',502);
     if(action==='send_message') requireValue(data.message_id,'Message was not confirmed. Please retry.',502);
     return {data};
   }

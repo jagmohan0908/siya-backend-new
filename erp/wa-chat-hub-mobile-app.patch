@@ -1,8 +1,18 @@
 diff --git a/wa_chat_hub/api/ai_bot.py b/wa_chat_hub/api/ai_bot.py
-index d2119df..6da5261 100644
+index d2119df..c44b495 100644
 --- a/wa_chat_hub/api/ai_bot.py
 +++ b/wa_chat_hub/api/ai_bot.py
-@@ -550,7 +550,15 @@ def process_message(message_id, skip_batch_wait: bool = False):
+@@ -276,7 +276,8 @@ def process_message(message_id, skip_batch_wait: bool = False):
+ 
+     msg_doc = safe_ai_get_doc("Chat Message", message_id)
+     frappe.flags.wa_ai_reply_to_message = str(message_id)
+-    frappe.local.wa_ai_reply_to_message = str(message_id)
++    frappe.local.wa_ai_reply_to_message = str(message_id)
++    frappe.local.mobile_app_reply_cards = None
+     conversation = msg_doc.conversation
+     set_ai_security_context(
+         operation="ai_autopilot",
+@@ -550,7 +551,15 @@ def process_message(message_id, skip_batch_wait: bool = False):
      last_user_query = _meaningful_body(body_text, content_type) or media_context[:500]
  
      agent_prompt = build_agent_prompt(route)
@@ -19,8 +29,35 @@ index d2119df..6da5261 100644
          agent_prompt_config = SimpleNamespace(
              system_prompt=agent_prompt,
              medical_guardrail_policy="",
+@@ -1799,6 +1808,11 @@ def _deliver_ai_reply(conversation: str, response_text: str) -> None:
+         delivery_status = "Failed"
+         outbound = {"sent": False, "error": "Interakt send failed"}
+ 
++    mobile_cards = []
++    if frappe.db.get_value("Chat Channel Account", convo.channel_account, "channel_type") == "Mobile App":
++        from sriaas_clinic.api.mobile_app_ai_tools import reply_cards
++        mobile_cards = reply_cards(conversation, reply_to_message)
++
+     frappe.flags.wa_ai_outbound_reply = True
+     frappe.local.wa_ai_outbound_reply = True
+     try:
+@@ -1810,11 +1824,13 @@ def _deliver_ai_reply(conversation: str, response_text: str) -> None:
+                 "sender_type": "AI",
+                 "content_type": "Text",
+                 "body": response_text,
++                "conversation": conversation,
+                 "delivery_status": delivery_status,
+                 "channel_message_id": channel_message_id,
+                 "raw_transport_payload": {
+                     **outbound,
+-                    "source": "ai_autopilot",
++                    "source": "ai_autopilot",
++                    "mobile_app_cards": mobile_cards,
+                     "reply_to_message": reply_to_message,
+                 },
+             }
 diff --git a/wa_chat_hub/api/mobile_app.py b/wa_chat_hub/api/mobile_app.py
-index 271ef57..69d4fea 100644
+index 271ef57..740a6dc 100644
 --- a/wa_chat_hub/api/mobile_app.py
 +++ b/wa_chat_hub/api/mobile_app.py
 @@ -3,6 +3,8 @@
@@ -72,11 +109,13 @@ index 271ef57..69d4fea 100644
      phone = normalize_phone(user.phone)
      if not phone:
          frappe.throw(_("Add a verified mobile number to your app profile before using AI chat."))
-@@ -287,9 +299,11 @@ def _assert_conversation_owner(conversation: str, context: dict[str, Any]):
+@@ -287,15 +299,19 @@ def _assert_conversation_owner(conversation: str, context: dict[str, Any]):
  
  
  def _message_rows(conversation: str, after: str | None = None, limit: int = DEFAULT_MESSAGE_LIMIT):
 -    filters: dict[str, Any] = {"conversation": conversation}
++    from sriaas_clinic.api.mobile_app_ai_tools import stored_cards
++
 +    filters: dict[str, Any] = {"conversation": conversation, "direction": ["!=", "Internal Note"]}
      after = str(after or "").strip()
      if after and frappe.db.exists("Chat Message", after):
@@ -85,7 +124,22 @@ index 271ef57..69d4fea 100644
          created = frappe.db.get_value("Chat Message", after, "creation")
          filters["creation"] = [">", created]
      rows = frappe.get_all(
-@@ -326,9 +340,9 @@ def _session_payload(convo, context: dict[str, Any]) -> dict[str, Any]:
+         "Chat Message",
+         filters=filters,
+-        fields=["name", "direction", "sender_type", "content_type", "body", "media_url", "delivery_status", "creation"],
++        fields=["name", "direction", "sender_type", "content_type", "body", "media_url", "delivery_status", "creation", "raw_transport_payload"],
+         order_by="creation asc",
+         limit_page_length=max(1, min(cint(limit or DEFAULT_MESSAGE_LIMIT), MAX_MESSAGE_LIMIT)),
+     )
+@@ -308,6 +324,7 @@ def _message_rows(conversation: str, after: str | None = None, limit: int = DEFA
+             "media_url": row.media_url or "",
+             "delivery_status": row.delivery_status or "",
+             "created_at": row.creation,
++            "cards": stored_cards(row.raw_transport_payload) if row.sender_type == "AI" else [],
+         }
+         for row in rows
+         if row.direction != "Internal Note"
+@@ -326,9 +343,9 @@ def _session_payload(convo, context: dict[str, Any]) -> dict[str, Any]:
  
  
  @frappe.whitelist(allow_guest=True, methods=["POST"])
@@ -97,7 +151,7 @@ index 271ef57..69d4fea 100644
      conversation = _ensure_conversation(context)
      convo = _assert_conversation_owner(conversation, context)
      frappe.db.commit()
-@@ -342,9 +356,10 @@ def send_message(
+@@ -342,9 +359,10 @@ def send_message(
      message: str,
      client_message_id: str,
      profile_id: str | None = None,
@@ -109,7 +163,15 @@ index 271ef57..69d4fea 100644
      convo = _assert_conversation_owner(conversation, context)
      text = str(message or "").strip()
      if not text:
-@@ -389,9 +404,10 @@ def send_attachment(
+@@ -364,6 +382,7 @@ def send_message(
+             "sender_type": "Customer",
+             "content_type": "Text",
+             "body": text,
++            "conversation": str(convo.name),
+             "provider_name": "Mobile App",
+             "provider_message_id": client_message_id,
+             "delivery_status": "Received",
+@@ -389,9 +408,10 @@ def send_attachment(
      client_message_id: str,
      caption: str | None = None,
      profile_id: str | None = None,
@@ -121,7 +183,7 @@ index 271ef57..69d4fea 100644
      convo = _assert_conversation_owner(conversation, context)
      content_type = str(content_type or "").title()
      if content_type not in {"Image", "Video", "Audio", "Document"}:
-@@ -439,9 +455,10 @@ def get_messages(
+@@ -439,9 +459,10 @@ def get_messages(
      profile_id: str | None = None,
      after: str | None = None,
      limit: int = DEFAULT_MESSAGE_LIMIT,
@@ -133,7 +195,7 @@ index 271ef57..69d4fea 100644
      convo = _assert_conversation_owner(conversation, context)
      return {
          "success": True,
-@@ -458,10 +475,11 @@ def escalate(
+@@ -458,10 +479,11 @@ def escalate(
      external_id: str,
      conversation: str,
      profile_id: str | None = None,
@@ -146,7 +208,7 @@ index 271ef57..69d4fea 100644
      convo = _assert_conversation_owner(conversation, context)
  
      # Repeated taps return the existing open care-team request for this chat.
-@@ -469,7 +487,8 @@ def escalate(
+@@ -469,7 +491,8 @@ def escalate(
      for row in frappe.get_all(
          "Support Ticket",
          filters={
@@ -156,7 +218,7 @@ index 271ef57..69d4fea 100644
              "category": "AI Chat Care Team",
              "status": ["not in", ["Resolved", "Closed"]],
          },
-@@ -477,7 +496,11 @@ def escalate(
+@@ -477,7 +500,11 @@ def escalate(
          order_by="creation desc",
          limit_page_length=20,
      ):
@@ -169,7 +231,7 @@ index 271ef57..69d4fea 100644
              existing = row
              break
  
-@@ -500,7 +523,8 @@ def escalate(
+@@ -500,7 +527,8 @@ def escalate(
      ticket = frappe.get_doc(
          {
              "doctype": "Support Ticket",
@@ -179,7 +241,7 @@ index 271ef57..69d4fea 100644
              "user_name": user.full_name,
              "user_email": user.email,
              "user_phone": user.phone,
-@@ -508,11 +532,11 @@ def escalate(
+@@ -508,11 +536,11 @@ def escalate(
              "phone": user.phone,
              "email": user.email,
              "subject": "Care-team assistance requested from AI chat",
@@ -193,7 +255,7 @@ index 271ef57..69d4fea 100644
              "status": "Open",
              "priority": "Medium",
              "category": "AI Chat Care Team",
-@@ -531,7 +555,7 @@ def escalate(
+@@ -531,7 +559,7 @@ def escalate(
          {
              "channel_account": convo.channel_account,
              "phone_number": context["phone"],
@@ -203,10 +265,29 @@ index 271ef57..69d4fea 100644
              "sender_type": "Agent",
              "content_type": "Text",
 diff --git a/wa_chat_hub/services.py b/wa_chat_hub/services.py
-index 29db404..ff6f19b 100644
+index 29db404..ba0d222 100644
 --- a/wa_chat_hub/services.py
 +++ b/wa_chat_hub/services.py
-@@ -498,7 +498,7 @@ def _append_message_impl(payload: Dict[str, Any]) -> Dict[str, str]:
+@@ -330,6 +330,8 @@ def find_conversation_for_phone(
+         if not existing:
+             frappe.throw(_("The selected conversation does not match this contact and Channel Account."))
+         return existing
++    if channel_account and safe_ai_get_value("Chat Channel Account", channel_account, "channel_type") == "Mobile App":
++        order_by = "creation desc, name desc"
+     return safe_ai_get_value(
+         "Chat Conversation", filters, "name",
+         order_by=order_by,
+@@ -482,7 +484,8 @@ def _append_message_impl(payload: Dict[str, Any]) -> Dict[str, str]:
+         assigned_to=routing.get("assigned_to"),
+         status=routing.get("queue_status") or DEFAULT_CONVERSATION_STATUS,
+         preferred_conversation=(
+-            payload.get("conversation") if payload.get("direction") == "Outbound" else None
++            payload.get("conversation") if (payload.get("direction") == "Outbound" or
++                payload.get("provider_name") == "Mobile App") else None
+         ),
+     )
+     contact = safe_ai_get_value("Chat Conversation", conversation, "contact", for_update=True)
+@@ -498,7 +501,7 @@ def _append_message_impl(payload: Dict[str, Any]) -> Dict[str, str]:
      if direction == "Outbound" and payload.get("sender_type") == "System":
          explicit_dedupe_key = str(payload.get("dedupe_key") or "").strip() or None
      dedupe_key = explicit_dedupe_key

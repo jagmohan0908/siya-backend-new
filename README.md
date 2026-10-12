@@ -526,4 +526,65 @@ Deployment:
 
 The previous standalone Mobile App AI Chat DocTypes are no longer written or
 created by setup. Existing records, if any, are retained; no customer history is
-deleted. This app screen currently supports text chat and care-team handoff.
+deleted.
+
+### ERP product, tracking and prescription replies
+
+The app renders ERP-supplied product cards (image, catalogue description, price,
+Buy now) and shipment cards (AWB, Track shipment). Both buttons open an in-app
+browser. Model prose cannot create executable links or orders.
+
+Install `erp/mobile_app_ai_tools.py` and `erp/configure_mobile_app_ai_tools.py`
+in `apps/sriaas_clinic/sriaas_clinic/api/`, alongside the bridge and updated WA
+patch. For an ERP already using the previous patch, reverse the old patch first
+or apply the incremental change; do not apply the full patch twice.
+
+Configure the site's `mobile_app_shopify_stores` object, keyed by app ID. Each
+store needs `domain` (Shopify domain), `storefront_domain` (public purchase host)
+and `storefront_token` (existing Storefront token). Keep credentials in site
+configuration, never in source control. There is no cross-app store fallback.
+Then run:
+
+```sh
+bench --site localhost execute sriaas_clinic.api.configure_mobile_app_ai_tools.configure
+```
+
+This registers three read-only MCP tools and enables them for **Siya Ayurveda
+Patient App** in WA Chat Hub Settings. It seeds the channel prompt only when
+blank, preserving later administrator edits. It adds account-scoped routes for
+verified care, shipment and purchase enquiries; it does not alter other channel
+prompts or their routes. Verified care uses the channel reply mode rather than
+the global Patient Care Agent's draft-only mode. Unverified identity restrictions
+remain enforced by both routing and tools. Restart production web/workers.
+
+- `search_mobile_products`: ERP queries this app's published Storefront catalogue.
+- `get_mobile_order_details`: only the verified patient's submitted invoices;
+  shipment invoice, patient and customer links must match. Shipkia links are
+  constructed from recorded AWBs; missing AWB means no tracking button.
+- `get_mobile_prescription`: recorded Patient Encounter prescriptions and SR
+  Instruction text; missing instructions must lead to care-team guidance, never
+  an inferred dosage. Invoices/catalogue descriptions are not prescriptions.
+
+Cards are collected from successful ERP lookups, bound to the current inbound
+message and conversation, and stored on the outbound Chat Message transport
+payload. Flutter only displays them. Prompt changes remain in **WA Chat Hub
+Settings > Account Prompt Maps > Siya Ayurveda Patient App**. Seedfit requires
+its own catalogue configuration and channel setup before enabling these tools.
+
+### QuickLink new chat
+
+QuickLink's **New chat** button calls authenticated `POST /v1/ai-chat/new-session`
+with the current conversation. ERP creates a separate conversation, preserving
+the old messages. Repeating the request returns the same successor conversation.
+Normal opening resumes the newest Mobile App conversation. Inbound messages and
+delayed AI replies are bound to their originating conversation, so old replies
+cannot spill into a new session.
+
+Deploy the updated ERP bridge and WA patch, then run once:
+
+```sh
+bench --site localhost execute sriaas_clinic.api.mobile_app_ai.setup_new_chat
+```
+
+This adds the unique `Previous Mobile App Chat` link used for retry protection.
+Deploy/restart the mobile backend for the new route before testing the button.
