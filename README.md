@@ -475,51 +475,55 @@ App Support Ticket DocType. ERP Date/Time values use the site's Asia/Kolkata zon
 and are returned to Flutter with an explicit UTC offset. The app never queues
 unsaved support messages offline.
 
-## ERP AI Chat
+## ERP AI Chat (WA Chat Hub channel flow)
 
-**Support Tickets > AI Chat** opens a separate text conversation. The phone calls
-this backend's authenticated `/v1/ai-chat/session`, `/messages` and `/escalate`
-routes. The backend verifies the customer and forwards the request to
-`sriaas_clinic.api.mobile_app_ai` in ERP. ERP generates the reply using its existing
-active **WA LLM Provider** record; neither the phone nor this backend needs a new
-AI key. This feature does not use WA Chat Hub background automation or require
-its service user.
+**Support Tickets > AI Chat** uses the same WA Chat Hub Mobile App transport as
+SRIAAS. The backend derives the account from the verified app login and calls
+`sriaas_clinic.api.mobile_app_ai`, a thin bridge to
+`wa_chat_hub.api.mobile_app`. ERP saves **Chat Conversation / Chat Message**,
+queues its normal AI autopilot, and the app polls for the resulting reply.
+There are no model calls, model credentials or hardcoded agent prompts in the
+app or mobile backend.
 
-Chat history is stored in **Mobile App AI Chat**, with **Mobile App AI Message**
-child rows. App and Mobile App User identify each conversation. Siya and Seedfit
-get separate conversations even for the same account. Only authenticated backend
-System Manager API access can call the ERP methods. There is no guest endpoint.
+Channels are **Siya Ayurveda Patient App** and **Seedfit Patient App**, both with
+Channel Type **Mobile App**. Each app must have an explicit channel mapping;
+unknown apps and missing mappings fail rather than select another app's channel.
+The original SRIAAS transport remains compatible with its unscoped calls.
 
-**Contact care team** creates a normal, app-scoped Support Ticket with the recent
-chat transcript and offers the existing ticket chat screen. Repeated taps reuse
-an open ticket; a resolved/closed ticket permits a new request. AI replies are
-labelled in the UI. The assistant provides app support and routes personal
-medical questions to the care team. It does not retrieve clinical records or
-order details, perform bookings/refunds, or send external messages.
+Edit prompts in **WA Chat Hub Settings**. The channel's active account-prompt row
+overrides non-empty fields; blank fields inherit the global settings. For Mobile
+App channels, that effective prompt is used even when the router selects an
+agent profile. Routing/identity guardrails remain in place. Existing WhatsApp
+channels retain their prompt precedence. Live tests changed a channel prompt and
+confirmed that the next AI reply changed without rebuilding Flutter.
+
+**Contact care team** creates an app-scoped Support Ticket with the conversation
+reference and transcript; repeated taps reuse the same open request. Existing
+app support ticket screens handle human replies. Mobile message retries are
+idempotent even when generic webhook deduplication is switched off. Internal
+notes are excluded from mobile history, and cursors must belong to the chat.
 
 Deployment:
 
-1. Copy `erp/mobile_app_ai.py` to the installed ERP app at
-   `sriaas_clinic/sriaas_clinic/api/mobile_app_ai.py` (relative to the bench's
-   `apps` directory). Restart the ERP web processes in production.
-2. Run `npm run setup:erp` to add the AI chat/message DocTypes and ticket fields.
-3. ERP must have an active chat-capable **WA LLM Provider** with a readable secret
-   and model configured. The existing OpenAI provider can be reused. An optional
-   site-config map `mobile_app_ai_providers` can explicitly select a provider by
-   app ID. Provider credentials remain inside ERP. A custom provider must have
-   its HTTPS chat-completions endpoint configured.
-4. Deploy this backend and rebuild/restart Flutter with `MOBILE_API_BASE_URL` set
-   as for existing ERP support tickets. No additional mobile/backend AI key or
-   WA Chat Hub account configuration is needed.
+1. In the installed `wa_chat_hub` repository, apply
+   `erp/wa-chat-hub-mobile-app.patch` (`git apply --check` first). This adds app
+   scoping, trusted backend API authentication, retry deduplication, ticket
+   scoping and Mobile App prompt precedence.
+2. Copy `erp/mobile_app_ai.py` to
+   `apps/sriaas_clinic/sriaas_clinic/api/mobile_app_ai.py` in the ERP bench.
+3. Create the two active **Chat Channel Account** records above, selecting the
+   existing configured AI Policy Bundle. In the ERP site's `site_config.json`:
+   `"mobile_app_ai_channel_accounts": {"siya-ayurveda":"Siya Ayurveda Patient App","seedfit":"Seedfit Patient App"}`.
+4. In **WA Chat Hub Settings**, configure the enabled dedicated service user,
+   existing provider, AI DocType permissions and automatic reply mode. The local
+   site uses **Mobile App AI Service**; no welcome email was sent. It is not an
+   app/customer login. Keep the short-queue worker running. Add active prompt-map
+   rows for the channels; blank prompts inherit the global prompt.
+5. Run `npm run setup:erp` for the existing Support Ticket app/user fields.
+   Restart ERP web/worker processes after production deployment. Deploy the
+   backend and app changes. The backend reuses its existing System Manager
+   `ERP_TOKEN`; no new AI key belongs in Flutter or `mobile_backend/.env`.
 
-ERP commits the customer message and generated answer together. A failed reply
-keeps the draft in the app for retry. Retrying the same request ID returns the
-stored answer without another model call. Polling uses conversation-owned
-message cursors and stops when the app goes into the background. The provider
-sees at most the last 20 conversation messages and the current question.
-
-Local verification included a real ERP-generated reply, app/account isolation,
-retry deduplication, pagination and ticket handoff. Attachments and voice are not
-part of this initial text-chat flow. The ERP chat request uses the provider's
-chat-completions API with response storage disabled; see the
-[OpenAI API conversation-state documentation](https://developers.openai.com/api/docs/guides/conversation-state).
+The previous standalone Mobile App AI Chat DocTypes are no longer written or
+created by setup. Existing records, if any, are retained; no customer history is
+deleted. This app screen currently supports text chat and care-team handoff.
