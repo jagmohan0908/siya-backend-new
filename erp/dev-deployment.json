@@ -1,0 +1,32 @@
+{
+  "site": "dev-sr.butest.tech",
+  "status": "QuickLink uses the normal ERP token and standard chat records; deploy the Node backend only.",
+  "privacy_requirement": "Dev rejects direct REST access to Patient, Sales Invoice and Patient Encounter under its customer-number privacy pilot. Integrate approved scoped ERP RPCs; do not disable the privacy restriction.",
+  "data_requirements": [
+    "Verify Jagmohan Koli's dev Patient by stable identity; then update Mobile App User profiles and its cached Siya Mobile Record identity together.",
+    "Local invoices and local patient IDs were not copied to dev.",
+    "Add real item/kit mappings and PDF attachments to dev Diet Charts.",
+    "Configure real kit records and invoice items; only the missing kit schema was copied.",
+    "Verify booking webhook credentials and payment keys before enabling paid bookings."
+  ],
+  "validation": "Run node --env-file=.env scripts/check-dev-readiness.mjs from mobile_backend, followed by authenticated Android flows.",
+  "pending_synthetic_test_cleanup": {
+    "doctype": "Siya Mobile Record",
+    "name": "2f477932b77386dabbaddcbcfc16321bdf8fa9811cb0a7a4a3fe58f76f0a9ec8",
+    "kind": "smoke",
+    "reason": "ERP rejected cleanup with QueryTimeoutError: document being modified by another user. Delete this synthetic test record after the server lock clears. It is not linked to a customer."
+  },
+  "quicklink": {
+    "backend": "src/ai-chat.mjs",
+    "erp_python_install_required": false,
+    "separate_chat_secret_required": false,
+    "prompt_location": "WA Chat Hub Settings > Account Prompt Maps > Siya Ayurveda Patient App",
+    "live_verified": [
+      "ERP-generated Siya reply",
+      "history",
+      "new session",
+      "message idempotency",
+      "app isolation"
+    ]
+  }
+}

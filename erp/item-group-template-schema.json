@@ -1,0 +1,180 @@
+{
+  "doctypes": [
+    {
+      "name": "Item Group Template Item",
+      "module": "Custom",
+      "custom": 1,
+      "autoname": null,
+      "istable": 1,
+      "title_field": null,
+      "fields": [
+        {
+          "fieldname": "item_code",
+          "label": "Item",
+          "fieldtype": "Link",
+          "options": "Item",
+          "reqd": 1,
+          "in_list_view": 1,
+          "read_only": 0,
+          "hidden": 0,
+          "precision": "",
+          "unique": 0
+        },
+        {
+          "fieldname": "item_name",
+          "label": "Item Name",
+          "fieldtype": "Data",
+          "reqd": 0,
+          "in_list_view": 1,
+          "read_only": 1,
+          "hidden": 0,
+          "fetch_from": "item_code.item_name",
+          "precision": "",
+          "unique": 0
+        },
+        {
+          "fieldname": "qty",
+          "label": "Qty",
+          "fieldtype": "Float",
+          "reqd": 0,
+          "default": "1",
+          "in_list_view": 1,
+          "read_only": 0,
+          "hidden": 0,
+          "precision": "",
+          "unique": 0
+        },
+        {
+          "fieldname": "rate",
+          "label": "Rate",
+          "fieldtype": "Currency",
+          "reqd": 0,
+          "in_list_view": 1,
+          "read_only": 0,
+          "hidden": 0,
+          "precision": "",
+          "unique": 0
+        },
+        {
+          "fieldname": "item_tax_template",
+          "label": "GST Template",
+          "fieldtype": "Link",
+          "options": "Item Tax Template",
+          "reqd": 0,
+          "in_list_view": 1,
+          "read_only": 0,
+          "hidden": 0,
+          "precision": "",
+          "unique": 0
+        }
+      ],
+      "permissions": []
+    },
+    {
+      "name": "Item Group Template",
+      "module": "Custom",
+      "custom": 1,
+      "autoname": "naming_series:",
+      "istable": 0,
+      "title_field": "template_name",
+      "fields": [
+        {
+          "fieldname": "naming_series",
+          "label": "Series",
+          "fieldtype": "Select",
+          "options": "IGT-.YY.-.#####",
+          "reqd": 1,
+          "default": "IGT-.YY.-.#####",
+          "in_list_view": 0,
+          "read_only": 0,
+          "hidden": 1,
+          "precision": "",
+          "unique": 0
+        },
+        {
+          "fieldname": "template_name",
+          "label": "Template Name",
+          "fieldtype": "Data",
+          "reqd": 1,
+          "in_list_view": 0,
+          "read_only": 0,
+          "hidden": 0,
+          "precision": "",
+          "unique": 0
+        },
+        {
+          "fieldname": "description",
+          "label": "Description",
+          "fieldtype": "Small Text",
+          "reqd": 0,
+          "in_list_view": 0,
+          "read_only": 0,
+          "hidden": 0,
+          "precision": "",
+          "unique": 0
+        },
+        {
+          "fieldname": "is_active",
+          "label": "Is Active",
+          "fieldtype": "Check",
+          "reqd": 0,
+          "default": "1",
+          "in_list_view": 1,
+          "read_only": 0,
+          "hidden": 0,
+          "precision": "",
+          "unique": 0
+        },
+        {
+          "fieldname": "section_items",
+          "label": "Items",
+          "fieldtype": "Section Break",
+          "reqd": 0,
+          "in_list_view": 0,
+          "read_only": 0,
+          "hidden": 0,
+          "precision": "",
+          "unique": 0
+        },
+        {
+          "fieldname": "items",
+          "label": "Items",
+          "fieldtype": "Table",
+          "options": "Item Group Template Item",
+          "reqd": 1,
+          "in_list_view": 0,
+          "read_only": 0,
+          "hidden": 0,
+          "precision": "",
+          "unique": 0
+        }
+      ],
+      "permissions": [
+        {
+          "role": "System Manager",
+          "read": 1,
+          "write": 1,
+          "create": 1,
+          "delete": 1,
+          "report": 1,
+          "export": 1
+        }
+      ]
+    }
+  ],
+  "invoice_fields": [
+    {
+      "dt": "Sales Invoice",
+      "fieldname": "item_group_template",
+      "label": "Item Group Template",
+      "fieldtype": "Link",
+      "options": "Item Group Template",
+      "reqd": 0,
+      "in_list_view": 0,
+      "read_only": 0,
+      "hidden": 0,
+      "precision": "",
+      "unique": 0
+    }
+  ]
+}

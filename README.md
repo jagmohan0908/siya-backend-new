@@ -475,116 +475,54 @@ App Support Ticket DocType. ERP Date/Time values use the site's Asia/Kolkata zon
 and are returned to Flutter with an explicit UTC offset. The app never queues
 unsaved support messages offline.
 
-## ERP AI Chat (WA Chat Hub channel flow)
+## ERP AI Chat (existing WA Chat Hub, normal ERP token)
 
-**Support Tickets > AI Chat** uses the same WA Chat Hub Mobile App transport as
-SRIAAS. The backend derives the account from the verified app login and calls
-`sriaas_clinic.api.mobile_app_ai`, a thin bridge to
-`wa_chat_hub.api.mobile_app`. ERP saves **Chat Conversation / Chat Message**,
-queues its normal AI autopilot, and the app polls for the resulting reply.
-There are no model calls, model credentials or hardcoded agent prompts in the
-app or mobile backend.
+QuickLink and Support AI Chat use `src/ai-chat.mjs` in this Node backend. Deploy
+this backend on Render with the existing `ERP_URL` and `ERP_TOKEN`. No custom
+Python module, WA patch, separate chat secret or OpenAI key is required.
+The files under `erp/mobile_app_ai*.py` and `wa-chat-hub-mobile-app.patch` are
+legacy local experiments, not deployment prerequisites for this transport.
 
-Channels are **Siya Ayurveda Patient App** and **Seedfit Patient App**, both with
-Channel Type **Mobile App**. Each app must have an explicit channel mapping;
-unknown apps and missing mappings fail rather than select another app's channel.
-The original SRIAAS transport remains compatible with its unscoped calls.
+The backend uses standard authenticated ERP REST operations on Chat Contact,
+Chat Conversation and Chat Message. The existing Chat Message after-insert hook
+runs WA Chat Hub's AI service. Replies and prompts remain owned by ERP.
 
-Edit prompts in **WA Chat Hub Settings**. The channel's active account-prompt row
-overrides non-empty fields; blank fields inherit the global settings. For Mobile
-App channels, that effective prompt is used even when the router selects an
-agent profile. Routing/identity guardrails remain in place. Existing WhatsApp
-channels retain their prompt precedence. Live tests changed a channel prompt and
-confirmed that the next AI reply changed without rebuilding Flutter.
+- Channels are fixed by validated app ID: Siya Ayurveda Patient App / Seedfit
+  Patient App. Never accept a channel, patient or external account from a caller.
+- Native mobile contacts use the ERP account/profile identity hash, with no phone
+  number. Profile membership does not verify ownership of a medical Patient.
+- Every chat operation verifies contact ownership and channel membership. Dev
+  masks contact references in document responses, so membership is checked with
+  an exact ERP filter using the authenticated account's known contact key.
+- Staff notes are excluded; polling cursors must belong to the same conversation.
+- Inbound messages use unique ERP dedupe keys. Retrying does not send a second
+  message. ERP failures are surfaced, never reported as a successful send.
+- New chat preserves prior history and uses the existing unique
+  `Chat Conversation.custom_mobile_previous_chat` link for retry protection.
+  This field is already configured on dev. Opening resumes the newest created
+  conversation. The current native ERP transport binds AI replies to the source
+  conversation.
+- Contact care team creates the existing app-scoped Support Ticket with a recent
+  transcript. It does not call the legacy mobile-app RPC.
 
-**Contact care team** creates an app-scoped Support Ticket with the conversation
-reference and transcript; repeated taps reuse the same open request. Existing
-app support ticket screens handle human replies. Mobile message retries are
-idempotent even when generic webhook deduplication is switched off. Internal
-notes are excluded from mobile history, and cursors must belong to the chat.
+Prompts are edited in WA Chat Hub Settings > Account Prompt Maps. Siya's public
+support route selects Channel Account Default so the channel prompt is used.
+Existing protected-data guards and other apps' prompts remain unchanged.
 
-Deployment:
+The current dev tools provide verified shipping history and prescriptions. They
+still enforce ERP patient verification. This transport does not grant Patient,
+Sales Invoice or Patient Encounter access, and does not fabricate product cards
+or dosages. Structured catalogue cards from the legacy custom Python tools are
+not available through the current dev tool set. Enable any additional capability
+through approved existing ERP tools and backend integration, not a Python install.
 
-1. In the installed `wa_chat_hub` repository, apply
-   `erp/wa-chat-hub-mobile-app.patch` (`git apply --check` first). This adds app
-   scoping, trusted backend API authentication, retry deduplication, ticket
-   scoping and Mobile App prompt precedence.
-2. Copy `erp/mobile_app_ai.py` to
-   `apps/sriaas_clinic/sriaas_clinic/api/mobile_app_ai.py` in the ERP bench.
-3. Create the two active **Chat Channel Account** records above, selecting the
-   existing configured AI Policy Bundle. In the ERP site's `site_config.json`:
-   `"mobile_app_ai_channel_accounts": {"siya-ayurveda":"Siya Ayurveda Patient App","seedfit":"Seedfit Patient App"}`.
-4. In **WA Chat Hub Settings**, configure the enabled dedicated service user,
-   existing provider, AI DocType permissions and automatic reply mode. The local
-   site uses **Mobile App AI Service**; no welcome email was sent. It is not an
-   app/customer login. Keep the short-queue worker running. Add active prompt-map
-   rows for the channels; blank prompts inherit the global prompt.
-5. Run `npm run setup:erp` for the existing Support Ticket app/user fields.
-   Restart ERP web/worker processes after production deployment. Deploy the
-   backend and app changes. The backend reuses its existing System Manager
-   `ERP_TOKEN`; no new AI key belongs in Flutter or `mobile_backend/.env`.
-
-The previous standalone Mobile App AI Chat DocTypes are no longer written or
-created by setup. Existing records, if any, are retained; no customer history is
-deleted.
-
-### ERP product, tracking and prescription replies
-
-The app renders ERP-supplied product cards (image, catalogue description, price,
-Buy now) and shipment cards (AWB, Track shipment). Both buttons open an in-app
-browser. Model prose cannot create executable links or orders.
-
-Install `erp/mobile_app_ai_tools.py` and `erp/configure_mobile_app_ai_tools.py`
-in `apps/sriaas_clinic/sriaas_clinic/api/`, alongside the bridge and updated WA
-patch. For an ERP already using the previous patch, reverse the old patch first
-or apply the incremental change; do not apply the full patch twice.
-
-Configure the site's `mobile_app_shopify_stores` object, keyed by app ID. Each
-store needs `domain` (Shopify domain), `storefront_domain` (public purchase host)
-and `storefront_token` (existing Storefront token). Keep credentials in site
-configuration, never in source control. There is no cross-app store fallback.
-Then run:
+Validation:
 
 ```sh
-bench --site localhost execute sriaas_clinic.api.configure_mobile_app_ai_tools.configure
+npm test
+node --env-file=.env scripts/check-dev-readiness.mjs
 ```
 
-This registers three read-only MCP tools and enables them for **Siya Ayurveda
-Patient App** in WA Chat Hub Settings. It seeds the channel prompt only when
-blank, preserving later administrator edits. It adds account-scoped routes for
-verified care, shipment and purchase enquiries; it does not alter other channel
-prompts or their routes. Verified care uses the channel reply mode rather than
-the global Patient Care Agent's draft-only mode. Unverified identity restrictions
-remain enforced by both routing and tools. Restart production web/workers.
-
-- `search_mobile_products`: ERP queries this app's published Storefront catalogue.
-- `get_mobile_order_details`: only the verified patient's submitted invoices;
-  shipment invoice, patient and customer links must match. Shipkia links are
-  constructed from recorded AWBs; missing AWB means no tracking button.
-- `get_mobile_prescription`: recorded Patient Encounter prescriptions and SR
-  Instruction text; missing instructions must lead to care-team guidance, never
-  an inferred dosage. Invoices/catalogue descriptions are not prescriptions.
-
-Cards are collected from successful ERP lookups, bound to the current inbound
-message and conversation, and stored on the outbound Chat Message transport
-payload. Flutter only displays them. Prompt changes remain in **WA Chat Hub
-Settings > Account Prompt Maps > Siya Ayurveda Patient App**. Seedfit requires
-its own catalogue configuration and channel setup before enabling these tools.
-
-### QuickLink new chat
-
-QuickLink's **New chat** button calls authenticated `POST /v1/ai-chat/new-session`
-with the current conversation. ERP creates a separate conversation, preserving
-the old messages. Repeating the request returns the same successor conversation.
-Normal opening resumes the newest Mobile App conversation. Inbound messages and
-delayed AI replies are bound to their originating conversation, so old replies
-cannot spill into a new session.
-
-Deploy the updated ERP bridge and WA patch, then run once:
-
-```sh
-bench --site localhost execute sriaas_clinic.api.mobile_app_ai.setup_new_chat
-```
-
-This adds the unique `Previous Mobile App Chat` link used for retry protection.
-Deploy/restart the mobile backend for the new route before testing the button.
+The readiness check is read-only and reports unrelated patient/order access
+blocks separately. An authenticated live chat test is still needed to verify
+ERP workers, provider settings and automatic replies.
