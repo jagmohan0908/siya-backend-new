@@ -48,6 +48,16 @@ export function createApi({service, authenticate, origins = [], allowBookings = 
         const body = ['POST','PUT'].includes(req.method) ? await readBody(req) : {};
         result = await service.queue.run(user.id,async () => {
           const route = `${req.method} ${url.pathname}`;
+          if (parts[0]==='v1' && parts[1]==='support-tickets') {
+            const query=Object.fromEntries(url.searchParams);
+            if(parts.length===2 && req.method==='GET') return service.support.list(user,appId,query);
+            if(parts.length===2 && req.method==='POST') return service.support.create(user,appId,body);
+            if(parts.length===3 && req.method==='GET') return service.support.messages(user,appId,parts[2]);
+            if(parts.length===3 && req.method==='PUT') return service.support.close(user,appId,parts[2],body);
+            if(parts.length===4 && parts[3]==='messages' && req.method==='GET') return service.support.messages(user,appId,parts[2],query);
+            if(parts.length===4 && parts[3]==='messages' && req.method==='POST') return service.support.send(user,appId,parts[2],body);
+            if(parts.length===4 && parts[3]==='read' && req.method==='POST') return service.support.read(user,appId,parts[2],body);
+          }
           if (route === 'GET /v1/profile') return service.profile(user);
           if (route === 'PUT /v1/profile') return service.saveProfile(user,body);
           if (route === 'GET /v1/appointments') return service.appointments(user);

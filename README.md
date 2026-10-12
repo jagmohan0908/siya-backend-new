@@ -449,3 +449,28 @@ The original prescription layout displays the clinic's data and hides the entry
 when absent. It does not manufacture a doctor, diagnosis, duration or expiry from
 a purchase. The standalone backend repository needs these same source/schema
 changes; pushing the app alone does not deploy its API.
+
+
+## ERP support tickets
+
+App builds with `MOBILE_API_BASE_URL` use authenticated `/v1/support-tickets`
+endpoints for ticket creation, history, chat, read receipts and closing a ticket.
+The existing Flutter screens are retained. The legacy support API and delayed n8n
+webhook are bypassed for ERP-enabled builds; there is no fallback on ERP failure.
+
+Run `setup:erp` to add `custom_mobile_app` (Siya Ayurveda / Seedfit) and
+`custom_mobile_app_user` on the existing **Support Ticket** DocType. Ownership
+comes from the verified login's `user_id`, never a submitted account ID. Reading
+or modifying tickets requires both that owner and the matching app. A patient
+link is not required to ask for support. Staff should reply in **Support Ticket
+Message**, linked to the ticket, with Sender Type **Agent**. Text replies and
+status changes appear in the app's existing chat refresh/polling flow. Only
+explicitly viewed agent messages are marked read. Existing chat has no attachment
+upload UI; attachment delivery is not added by this integration.
+
+Staff-created records must have the exact verified external `user_id` and Mobile
+App selected to appear in that account's app. Unlabelled legacy tickets are not
+shown across apps. This change does not migrate old API tickets or the separate
+App Support Ticket DocType. ERP Date/Time values use the site's Asia/Kolkata zone
+and are returned to Flutter with an explicit UTC offset. The app never queues
+unsaved support messages offline.

@@ -1,3 +1,4 @@
+import {SupportTickets} from './support-tickets.mjs';
 import {randomUUID} from 'node:crypto';
 import {ApiError, object, requireValue, text} from './errors.mjs';
 import {Records, SerialQueue, recordName} from './store.mjs';
@@ -27,6 +28,7 @@ export class MobileService {
     Object.assign(this, {erp, webhookUrl, webhookSecret, fetcher, rewardIssuer, payments, productImage, productCatalog, s3PresignMethod});
     this.records = new Records(erp); this.queue = new SerialQueue();
     this.assessments = new Assessments(erp);
+    this.support = new SupportTickets(this);
   }
   async identity(user) {
     let record = await this.records.read(user.id, 'identity', 'self');

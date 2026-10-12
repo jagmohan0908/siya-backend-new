@@ -1,3 +1,4 @@
+import {setupSupportSchema} from './support-schema.mjs';
 import {Erp} from '../src/erp.mjs';
 import {setupAssessmentSchema} from './assessment-schema.mjs';
 import {setupHabitSchema} from './habit-schema.mjs';
@@ -21,3 +22,6 @@ if (!await erp.maybe('DocType', name)) {
 console.log(await setupAssessmentSchema(erp) ? 'Created Mobile App Assessment' : 'Mobile App Assessment already exists');
 await setupHabitSchema(erp);
 console.log('Mobile App User habit tracker fields ready');
+
+await setupSupportSchema(erp);
+console.log('Support Ticket app and account fields ready');
