@@ -48,6 +48,10 @@ export function createApi({service, authenticate, origins = [], allowBookings = 
         const body = ['POST','PUT'].includes(req.method) ? await readBody(req) : {};
         result = await service.queue.run(user.id,async () => {
           const route = `${req.method} ${url.pathname}`;
+          if (route==='POST /v1/ai-chat/session') return service.aiChat.call(user,appId,'open_session',body);
+          if (route==='GET /v1/ai-chat/messages') return service.aiChat.call(user,appId,'get_messages',Object.fromEntries(url.searchParams));
+          if (route==='POST /v1/ai-chat/messages') return service.aiChat.call(user,appId,'send_message',body);
+          if (route==='POST /v1/ai-chat/escalate') return service.aiChat.call(user,appId,'escalate',body);
           if (parts[0]==='v1' && parts[1]==='support-tickets') {
             const query=Object.fromEntries(url.searchParams);
             if(parts.length===2 && req.method==='GET') return service.support.list(user,appId,query);

@@ -1,4 +1,5 @@
 import {setupSupportSchema} from './support-schema.mjs';
+import {setupAiChatSchema} from './ai-chat-schema.mjs';
 import {Erp} from '../src/erp.mjs';
 import {setupAssessmentSchema} from './assessment-schema.mjs';
 import {setupHabitSchema} from './habit-schema.mjs';
@@ -25,3 +26,5 @@ console.log('Mobile App User habit tracker fields ready');
 
 await setupSupportSchema(erp);
 console.log('Support Ticket app and account fields ready');
+await setupAiChatSchema(erp);
+console.log('Mobile App AI Chat and message fields ready');

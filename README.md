@@ -474,3 +474,52 @@ shown across apps. This change does not migrate old API tickets or the separate
 App Support Ticket DocType. ERP Date/Time values use the site's Asia/Kolkata zone
 and are returned to Flutter with an explicit UTC offset. The app never queues
 unsaved support messages offline.
+
+## ERP AI Chat
+
+**Support Tickets > AI Chat** opens a separate text conversation. The phone calls
+this backend's authenticated `/v1/ai-chat/session`, `/messages` and `/escalate`
+routes. The backend verifies the customer and forwards the request to
+`sriaas_clinic.api.mobile_app_ai` in ERP. ERP generates the reply using its existing
+active **WA LLM Provider** record; neither the phone nor this backend needs a new
+AI key. This feature does not use WA Chat Hub background automation or require
+its service user.
+
+Chat history is stored in **Mobile App AI Chat**, with **Mobile App AI Message**
+child rows. App and Mobile App User identify each conversation. Siya and Seedfit
+get separate conversations even for the same account. Only authenticated backend
+System Manager API access can call the ERP methods. There is no guest endpoint.
+
+**Contact care team** creates a normal, app-scoped Support Ticket with the recent
+chat transcript and offers the existing ticket chat screen. Repeated taps reuse
+an open ticket; a resolved/closed ticket permits a new request. AI replies are
+labelled in the UI. The assistant provides app support and routes personal
+medical questions to the care team. It does not retrieve clinical records or
+order details, perform bookings/refunds, or send external messages.
+
+Deployment:
+
+1. Copy `erp/mobile_app_ai.py` to the installed ERP app at
+   `sriaas_clinic/sriaas_clinic/api/mobile_app_ai.py` (relative to the bench's
+   `apps` directory). Restart the ERP web processes in production.
+2. Run `npm run setup:erp` to add the AI chat/message DocTypes and ticket fields.
+3. ERP must have an active chat-capable **WA LLM Provider** with a readable secret
+   and model configured. The existing OpenAI provider can be reused. An optional
+   site-config map `mobile_app_ai_providers` can explicitly select a provider by
+   app ID. Provider credentials remain inside ERP. A custom provider must have
+   its HTTPS chat-completions endpoint configured.
+4. Deploy this backend and rebuild/restart Flutter with `MOBILE_API_BASE_URL` set
+   as for existing ERP support tickets. No additional mobile/backend AI key or
+   WA Chat Hub account configuration is needed.
+
+ERP commits the customer message and generated answer together. A failed reply
+keeps the draft in the app for retry. Retrying the same request ID returns the
+stored answer without another model call. Polling uses conversation-owned
+message cursors and stops when the app goes into the background. The provider
+sees at most the last 20 conversation messages and the current question.
+
+Local verification included a real ERP-generated reply, app/account isolation,
+retry deduplication, pagination and ticket handoff. Attachments and voice are not
+part of this initial text-chat flow. The ERP chat request uses the provider's
+chat-completions API with response storage disabled; see the
+[OpenAI API conversation-state documentation](https://developers.openai.com/api/docs/guides/conversation-state).
