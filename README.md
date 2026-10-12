@@ -509,12 +509,29 @@ Prompts are edited in WA Chat Hub Settings > Account Prompt Maps. Siya's public
 support route selects Channel Account Default so the channel prompt is used.
 Existing protected-data guards and other apps' prompts remain unchanged.
 
+Product cards use the existing Shopify Storefront credentials in this backend.
+`src/chat-products.mjs` matches public catalogue titles/tags to product enquiries,
+returns up to three real products, and restricts purchase links to Siya's store.
+Order, dosage and side-effect questions do not trigger catalogue suggestions.
+Seedfit never receives Siya's catalogue; it needs its own catalogue integration.
+No patient details or chat text are sent to Shopify. Catalogue requests have a
+bounded timeout and cache; failures leave the ERP chat usable without cards.
+
+The inbound ERP Chat Message stores a catalogue snapshot in transport metadata.
+A compact catalogue reference is supplied to ERP with the question so its AI can
+explain actual product facts. The app displays the original question. Cards are
+attached only to the AI reply whose ERP reply_to_message points to that inbound
+message, after conversation/app ownership checks. No model-generated product
+links are trusted. History and polling use the same snapshots; prices are the
+catalogue prices at the time of the message and checkout confirms current prices.
+
 The current dev tools provide verified shipping history and prescriptions. They
-still enforce ERP patient verification. This transport does not grant Patient,
-Sales Invoice or Patient Encounter access, and does not fabricate product cards
-or dosages. Structured catalogue cards from the legacy custom Python tools are
-not available through the current dev tool set. Enable any additional capability
-through approved existing ERP tools and backend integration, not a Python install.
+still enforce ERP patient verification. Siya's verified-care route selects its
+channel prompt only for already Verified Patient conversations. This backend
+does not grant Patient, Sales Invoice or Patient Encounter access or mark an app
+profile as medically verified. The current test user has no linked Patient and
+an Unverified conversation; the ERP team must provide approved verification and
+patient-scoped API access before private answers can be tested end to end.
 
 Validation:
 

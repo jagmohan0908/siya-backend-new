@@ -6,6 +6,7 @@ import {MobileService} from './service.mjs';
 import {createRewardIssuer} from './shopify.mjs';
 import {Razorpay} from './payments.mjs';
 import {createProductCatalog} from './product-images.mjs';
+import {createChatProductSearch} from './chat-products.mjs';
 import {ApiError, requireValue} from './errors.mjs';
 
 async function readBody(req) {
@@ -116,6 +117,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const erp = new Erp({url:process.env.ERP_URL,token:process.env.ERP_TOKEN});
   const productCatalog=createProductCatalog({domain:process.env.SHOPIFY_DOMAIN,storefrontToken:process.env.SHOPIFY_STOREFRONT_TOKEN});
   const service = new MobileService({erp,webhookUrl:process.env.APPOINTMENT_WEBHOOK_URL,
+    chatProducts:createChatProductSearch({domain:process.env.SHOPIFY_DOMAIN,storefrontToken:process.env.SHOPIFY_STOREFRONT_TOKEN}),
     s3PresignMethod:process.env.S3_PRESIGN_METHOD,
     productCatalog,productImage:async item=>(await productCatalog(item)).imageUrl,
     payments:new Razorpay({keyId:process.env.RAZORPAY_KEY_ID,keySecret:process.env.RAZORPAY_KEY_SECRET}),

@@ -23,7 +23,7 @@ class Erp {
       .filter(d=>Object.entries(filters).every(([k,v])=>Array.isArray(v)?
         v[0]==='in'?v[1].includes(d[k]):v[0]==='not in'?!v[1].includes(d[k]):v[0]==='>='&&d[k]>=v[1]:String(d[k])===String(v)))
       .sort((a,b)=>{for(const part of order.split(',')){const [k,dir]=part.trim().split(/\s+/);const c=String(a[k]||'').localeCompare(String(b[k]||''),undefined,{numeric:true});if(c)return dir==='desc'?-c:c}return 0})
-      .slice(0,limit).map(d=>structuredClone(d));
+      .slice(0,limit).map(d=>structuredClone(fields?.length?Object.fromEntries(fields.map(k=>[k,d[k]])):d));
   }
 }
 const user={id:'customer'},app='siya-ayurveda';
@@ -100,4 +100,28 @@ test('all five HTTP routes require login; normal authenticated routes use only E
   assert.equal((await fetch(`${base}/v1/ai-chat/${path}`,opts)).status,401);opts.headers.Authorization='Bearer test';
   assert.equal((await fetch(`${base}/v1/ai-chat/${path}`,opts)).status,200);
  }}finally{await new Promise(r=>server.close(r))}
+});
+
+test('backend catalogue facts reach ERP while app messages retain original text; retry reuses snapshot',async()=>{
+ const {chat,service,erp,id}=await setup();let searches=0;
+ const card={type:'product',product_id:'gid://shopify/Product/1',title:'Acne Gel',description:'Catalogue facts',price:'699',currency:'INR',available:true,url:'https://siyaayurveda.com/products/acne-gel',image_url:'https://cdn.shopify.com/a.png'};
+ service.chatProducts=async()=>{searches++;return [card]};
+ const body={conversation:id,message:'Show acne products',client_message_id:'catalogue'};
+ const sent=await chat.call(user,app,'send_message',body);await chat.call(user,app,'send_message',body);assert.equal(searches,1);
+ const incoming=await erp.get('Chat Message',sent.data.message_id);assert.match(incoming.body,/App catalogue reference/);
+ await erp.create('Chat Message',{conversation:id,direction:'Outbound',sender_type:'AI',body:'Here are catalogue options',raw_transport_payload:JSON.stringify({source:'ai_autopilot',reply_to_message:incoming.name})});
+ const messages=(await chat.call(user,app,'get_messages',{conversation:id})).data.messages;
+ assert.equal(messages[0].message,body.message);assert.deepEqual(messages[1].cards,[card]);
+});
+test('cards require exact ERP reply binding and reject cross-conversation or cross-app metadata',async()=>{
+ const {chat,erp,id}=await setup();
+ const card={type:'product',product_id:'gid://shopify/Product/1',title:'Acne Gel',price:'1',currency:'INR',url:'https://siyaayurveda.com/products/acne-gel'};
+ const inbound=await erp.create('Chat Message',{conversation:'foreign',direction:'Inbound',sender_type:'Customer',provider_name:'Mobile App',raw_transport_payload:JSON.stringify({source:'siya_backend_catalog_v1',appId:app,cards:[card]})});
+ const reply={conversation:id,direction:'Outbound',sender_type:'AI',body:'Reply',raw_transport_payload:JSON.stringify({source:'ai_autopilot',reply_to_message:inbound.name})};
+ await erp.create('Chat Message',reply);
+ assert.deepEqual((await chat.call(user,app,'get_messages',{conversation:id})).data.messages[0].cards,[]);
+ const stored=erp.docs.get('Chat Message/'+inbound.name);stored.conversation=id;stored.raw_transport_payload=JSON.stringify({source:'siya_backend_catalog_v1',appId:'seedfit',cards:[card]});
+ assert.deepEqual((await chat.call(user,app,'get_messages',{conversation:id})).data.messages.at(-1).cards,[]);
+ reply.raw_transport_payload='{}';await erp.create('Chat Message',reply);
+ assert.deepEqual((await chat.call(user,app,'get_messages',{conversation:id})).data.messages.at(-1).cards,[]);
 });
