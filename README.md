@@ -5,11 +5,14 @@ service has no separate patient database. Shopify continues to own catalog,
 checkout, login-token verification, and issued discount codes. ERP File records
 own S3 attachment metadata. n8n remains responsible for appointment automation.
 
-**This is a staged implementation, not a completed production cutover.** Debug/IDE
-builds default to `https://siya-backend-new.onrender.com` so a normal restart does
-not switch profile uploads back to Supabase. Release/profile builds still require
-`--dart-define=MOBILE_API_BASE_URL=https://siya-backend-new.onrender.com` for the
-staged API. An explicit empty define selects the legacy build for comparison.
+**This is a staged implementation, not a completed production cutover.** Debug,
+profile, and release builds all default to `https://siya-backend-new.onrender.com`.
+A normal APK/AAB build therefore uses the same ERP-backed features as Android
+Studio. `MOBILE_API_BASE_URL` can override the endpoint for a test build; an
+explicit empty define selects the legacy build for comparison. The release
+scripts explicitly select the Render endpoint and `MOBILE_APP_ID=siya-ayurveda`.
+Changing `mobile_backend/.env` affects the backend, not compiled APK settings.
+After changing Flutter build configuration, rebuild and install the new APK.
 Configured builds never silently fall back to Shopify/Supabase for ERP records.
 The reference `mobile_app` ERP source has not been modified.
 
