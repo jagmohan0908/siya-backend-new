@@ -329,12 +329,16 @@ test('a verified webhook encounter is returned with the ERP meeting link and sta
   await erp.update('Healthcare Practitioner','Megha',{custom_accept_online_appointments:1});
   service.fetcher=async () => {
     const enc=await erp.create('Patient Encounter',{doctype:'Patient Encounter',patient:'patient-test',docstatus:0,
-      sr_notes:`External appointment ID: ${booking.id}`,custom_appointment_status:'Approved',google_meet_link:'https://meet.google.com/test-link'});
+      sr_notes:`External appointment ID: ${booking.id}`,sr_encounter_place:'Online',custom_appointment_status:'Approved',google_meet_link:'https://meet.google.com/test-link'});
     return Response.json([{data:enc}]);
   };
   const result=await service.createAppointment(user,{...booking,consultationType:'video'});
   assert.equal(result.bookingSyncPending,false);assert.equal(result.status,'confirmed');
   assert.equal(result.meetingLink,'https://meet.google.com/test-link');
+  const reservation=await erp.get('Mobile App Appointment',result.reservation);
+  assert.equal(reservation.consultation_type,result.meetingLink);
+  assert.equal(reservation.is_online,1);
+  assert.equal(reservation.google_meet_link,result.meetingLink);
   const second=await service.createAppointment(user,{...booking,consultationType:'video'});
   assert.equal(second.erpEncounterId,result.erpEncounterId);
   assert.equal(erp.created.filter(row=>row.type==='Patient Encounter').length,1);
@@ -896,6 +900,33 @@ test('Meet links follow current ERP data and never appear on OPD bookings',async
       assert.equal((await service.refreshAppointment(user,linked)).meetingLink,null);
     }
   }
+});
+
+test('a delayed ERP Meet link repairs the owned reservation without rebooking',async()=>{
+  const {erp,service}=setup({webhookUrl:'https://webhook.test'});
+  await erp.update('Healthcare Practitioner','Megha',{custom_accept_online_appointments:1});
+  let deliveries=0;
+  service.fetcher=async()=>{
+    deliveries++;
+    return Response.json({data:await erp.create('Patient Encounter',{
+      doctype:'Patient Encounter',patient:'patient-test',sr_encounter_place:'Online',
+      sr_notes:`External appointment ID: ${booking.id}`,custom_appointment_status:'Approved',
+    })});
+  };
+  const saved=await service.createAppointment(user,{...booking,consultationType:'video'});
+  await erp.update('Mobile App Appointment',saved.reservation,{consultation_type:'OPD Consultation',is_online:0});
+  const link='https://meet.google.com/abc-defg-hij';
+  await erp.update('Patient Encounter',saved.erpEncounterId,{google_meet_link:link});
+  const record=await service.records.read(user.id,'appointment',booking.id);
+  const refreshed=await service.refreshAppointment(user,record);
+  assert.equal(refreshed.consultationType,'video');assert.equal(refreshed.meetingLink,link);
+  const reservation=await erp.get('Mobile App Appointment',saved.reservation);
+  assert.equal(reservation.consultation_type,link);assert.equal(reservation.is_online,1);
+  assert.equal(reservation.google_meet_link,link);assert.equal(deliveries,1);
+  assert.equal(erp.created.filter(d=>d.type==='Mobile App Appointment').length,1);
+  await erp.update('Mobile App Appointment',saved.reservation,{patient_encounter:'other',consultation_type:'OPD Consultation',is_online:0});
+  await service.refreshAppointment(user,record);
+  assert.equal((await erp.get('Mobile App Appointment',saved.reservation)).is_online,0);
 });
 
 test('doctor photos serve only the selected practitioner attachment and reject non-image content',async()=>{

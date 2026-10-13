@@ -327,7 +327,13 @@ export class MobileService {
     const data = {...record.data, erpEncounterId: encounter.name, erpPatientId: encounter.patient,
       erpAppointmentReference: encounter.encounter_reference, status: this.encounterBookingStatus(encounter, record.data),
       meetingLink: appointmentMeetLink(record.data, encounter.google_meet_link), bookingSyncPending: false, encounterSyncPending: false, deliveryState: 'acknowledged'};
-    await this.erp.update('Mobile App Appointment', data.reservation, {patient_encounter: encounter.name,modified:reservation.modified});
+    await this.erp.update('Mobile App Appointment', data.reservation, {
+      patient_encounter: encounter.name, modified:reservation.modified,
+      // ERP recognizes online reservations by the real Meet URL, not the app's "video" label.
+      ...(encounter.sr_encounter_place === 'Online' && data.meetingLink ? {
+        consultation_type:data.meetingLink,is_online:1,google_meet_link:data.meetingLink,
+      } : {}),
+    });
     // Do not automatically grant access to a historical patient matched by phone inside n8n.
     // An existing explicit account->Patient mapping remains the authority for records/invoices.
     const saved = await this.records.write(user.id, 'appointment', data.id, data, record.revision);
@@ -345,15 +351,25 @@ export class MobileService {
     return data;
   }
   async refreshAppointment(user, record) {
+    let reservation;
     if (record.data.reservation) {
-      const reservation = await this.bookingReservation(user, record.data);
+      reservation = await this.bookingReservation(user, record.data);
       record = {...record,data:this.reservationBookingData(reservation,record.data)};
       record.data.meetingLink = appointmentMeetLink(record.data, reservation.google_meet_link);
     }
     if (record.data.erpEncounterId) {
       const enc = await this.erp.get('Patient Encounter', record.data.erpEncounterId);
       const data = {...record.data, status: this.encounterBookingStatus(enc, record.data)};
-      return {...data, meetingLink: appointmentMeetLink(data, enc.google_meet_link)};
+      const meetingLink = appointmentMeetLink(data, enc.google_meet_link);
+      // A Google link can arrive after the webhook has finished. Keep the owned ERP
+      // reservation in sync when the app refreshes, without creating another meeting.
+      if (meetingLink && enc.sr_encounter_place === 'Online' && reservation?.patient_encounter === enc.name &&
+          (reservation.consultation_type !== meetingLink || Number(reservation.is_online) !== 1 || reservation.google_meet_link !== meetingLink)) {
+        await this.erp.update('Mobile App Appointment',data.reservation,{
+          consultation_type:meetingLink,is_online:1,google_meet_link:meetingLink,modified:reservation.modified,
+        });
+      }
+      return {...data, meetingLink};
     }
     if (record.data.deliveryState === 'sent') {
       const matches = await this.erp.list('Patient Encounter', {sr_notes: ['like', `%External appointment ID: ${record.data.id}%`]}, ['name'], {limit: 2});
