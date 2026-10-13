@@ -2,6 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {Erp} from '../src/erp.mjs';
 
+test('ERP failures retain only a safe upstream status for optional capabilities',async()=>{
+  const erp=new Erp({url:'https://erp.example.com',token:'test-token',fetcher:async()=>
+    Response.json({exc_type:'PermissionError',exception:'PRIVATE TRACE'},{status:403})});
+  await assert.rejects(erp.list('Shipment Tracking Shipment'),error=>{
+    assert.equal(error.status,502);assert.equal(error.code,'erp_request_failed');
+    assert.equal(error.upstreamStatus,403);
+    assert.ok(!JSON.stringify(error).includes('PRIVATE TRACE'));
+    return true;
+  });
+});
+
 test('ngrok ERP JSON requests bypass the browser warning and retain authentication', async () => {
   const erp = new Erp({url:'https://emission-stable-jackknife.ngrok-free.dev/',token:'test-token',
     fetcher:async (url,options) => {

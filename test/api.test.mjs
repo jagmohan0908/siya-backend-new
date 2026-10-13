@@ -504,6 +504,40 @@ test('shipment refresh checks ownership, updates events and isolates carrier fai
   await assert.rejects(service.refreshInvoiceTracking(user,invoice.name),{status:404});assert.equal(calls,2);
 });
 
+test('shipment permission denial preserves owned orders and reports refresh unavailable',async()=>{
+  for(const deniedOperation of ['list','get']) {
+    const {service,erp}=setup();await service.identity(user);
+    const identity=await service.records.read(user.id,'identity','self');
+    const patient=await erp.create('Patient',{});
+    await service.records.write(user.id,'identity','self',{...identity.data,patient:patient.name},identity.revision);
+    const invoice=await erp.create('Sales Invoice',{patient:patient.name,docstatus:1,grand_total:1499,items:[],si_shipkia_awb_number:'SAVED-AWB'});
+    const other=await erp.create('Sales Invoice',{patient:'other',docstatus:1,items:[]});
+    erp.docs.set('DocType/Shipment Tracking Shipment',{name:'Shipment Tracking Shipment'});
+    await erp.create('Shipment Tracking Shipment',{sales_invoice:invoice.name,patient:patient.name});
+    const original=erp[deniedOperation].bind(erp);
+    let upstreamStatus=403,reads=0;
+    erp[deniedOperation]=async(type,...args)=>{
+      if(type==='Shipment Tracking Shipment') {
+        reads++;
+        throw Object.assign(new ApiError(502,'erp_request_failed','ERP unavailable'),{upstreamStatus});
+      }
+      return original(type,...args);
+    };
+    erp.method=async()=>{throw Error('Must not request a carrier refresh');};
+    const result=await service.orders(user);
+    assert.deepEqual(result.items.map(i=>i.id),[invoice.name]);
+    assert.equal(result.items[0].total,1499);
+    assert.equal((await service.invoice(user,invoice.name)).tracking.number,'SAVED-AWB');
+    const refresh=await service.refreshInvoiceTracking(user,invoice.name);
+    assert.equal(refresh.refreshState,'unavailable');assert.equal(refresh.tracking.number,'SAVED-AWB');
+    const authorizedReads=reads;
+    await assert.rejects(service.invoice(user,other.name),{status:404});
+    await assert.rejects(service.refreshInvoiceTracking(user,other.name),{status:404});
+    assert.equal(reads,authorizedReads);
+    for(upstreamStatus of [401,404,500]) await assert.rejects(service.orders(user),{code:'erp_request_failed'});
+  }
+});
+
 test('an invoice without a shipment never triggers a carrier request',async()=>{
   const {service,erp}=setup();await service.identity(user);
   const identity=await service.records.read(user.id,'identity','self');

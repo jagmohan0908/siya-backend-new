@@ -486,7 +486,7 @@ export class MobileService {
         const doc = await this.erp.get(row.type,row.name);
         requireValue(doc.docstatus === 1 && (row.type === 'Sales Invoice' && doc.patient === patient.name ||
           identity.customers?.includes(doc.customer)), 'Order not found',404);
-        const shipment = row.type === 'Sales Invoice' ? await this.invoiceShipment(doc) : null;
+        const shipment = row.type === 'Sales Invoice' ? await this.invoiceShipment(doc,{optional:true}) : null;
         return orderDetails({...doc,doctype:row.type},patient,this.productImage,
           row.type === 'Sales Invoice' ? trackingSummary(doc,shipment) : null,
           await invoiceKit(this.erp,doc,this.productImage));
@@ -495,15 +495,23 @@ export class MobileService {
     return {items:items.sort((a,b)=>String(b.date).localeCompare(String(a.date))),
       nextCursor: rows.length > 20 || orders.length > 20 ? offset + 20 : null};
   }
-  async invoiceShipment(invoice) {
+  async invoiceShipment(invoice, {optional = false} = {}) {
     if (!this.shipmentCapability || this.shipmentCapability.until < Date.now()) {
       this.shipmentCapability = {until:Date.now()+300_000,
         ready:this.erp.maybe('DocType','Shipment Tracking Shipment').then(Boolean).catch(()=>false)};
     }
     if (!await this.shipmentCapability.ready) return null;
-    const rows = await this.erp.list('Shipment Tracking Shipment',{sales_invoice:invoice.name},['name'],{limit:2});
-    if (rows.length !== 1) return null;
-    const shipment = await this.erp.get('Shipment Tracking Shipment',rows[0].name);
+    let shipment;
+    try {
+      const rows = await this.erp.list('Shipment Tracking Shipment',{sales_invoice:invoice.name},['name'],{limit:2});
+      if (rows.length !== 1) return null;
+      shipment = await this.erp.get('Shipment Tracking Shipment',rows[0].name);
+    } catch (error) {
+      // Optional shipment access must not hide an already authorized invoice.
+      // Keep ownership mismatches and all other failures visible.
+      if (optional && error.code === 'erp_request_failed' && error.upstreamStatus === 403) return null;
+      throw error;
+    }
     requireValue(shipment.sales_invoice === invoice.name && (!shipment.patient || shipment.patient === invoice.patient) &&
       (!shipment.customer || shipment.customer === invoice.customer) &&
       (!invoice.si_shipkia_shipment || invoice.si_shipkia_shipment === shipment.name) &&
@@ -522,12 +530,19 @@ export class MobileService {
     const {invoice,patient} = await this.ownedInvoice(user,id);
     if (pdf) return this.erp.request(`/api/method/frappe.utils.print_format.download_pdf?${new URLSearchParams({doctype:'Sales Invoice',name:id,format:'Standard',no_letterhead:'0'})}`, {raw:true});
     return orderDetails({...invoice,doctype:'Sales Invoice'},patient,this.productImage,
-      trackingSummary(invoice,await this.invoiceShipment(invoice)),await invoiceKit(this.erp,invoice,this.productImage));
+      trackingSummary(invoice,await this.invoiceShipment(invoice,{optional:true})),await invoiceKit(this.erp,invoice,this.productImage));
   }
   async refreshInvoiceTracking(user, id) {
     // Authorize before querying tracking or triggering a carrier refresh.
     const {invoice} = await this.ownedInvoice(user,id);
-    const shipment = await this.invoiceShipment(invoice);
+    let shipment;
+    try { shipment = await this.invoiceShipment(invoice); }
+    catch (error) {
+      if (error.code === 'erp_request_failed' && error.upstreamStatus === 403) {
+        return {tracking:trackingSummary(invoice,null),refreshState:'unavailable'};
+      }
+      throw error;
+    }
     if (!shipment) return {tracking:trackingSummary(invoice,null),refreshState:'not_available'};
     try {
       const settings = await this.erp.method('shipment_tracking.api.tracking.get_tracking_ui_settings');

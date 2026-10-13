@@ -18,7 +18,10 @@ export class Erp {
         throw new ApiError(409,'revision_conflict','This record changed. Refresh and try again.');
       }
       const status = response.status === 404 ? 404 : response.status === 409 ? 409 : response.status === 413 ? 413 : 502;
-      throw new ApiError(status, 'erp_request_failed', response.status === 413 ? 'Image is too large. Please choose a smaller image.' : `ERP could not complete the request (${response.status})`);
+      const failure = new ApiError(status, 'erp_request_failed', response.status === 413 ? 'Image is too large. Please choose a smaller image.' : `ERP could not complete the request (${response.status})`);
+      // Internal classification only; never retain the ERP response or credentials.
+      failure.upstreamStatus = response.status;
+      throw failure;
     }
     if (raw) return response;
     const result = await response.json();
