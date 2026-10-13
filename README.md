@@ -529,9 +529,9 @@ The current dev tools provide verified shipping history and prescriptions. They
 still enforce ERP patient verification. Siya's verified-care route selects its
 channel prompt only for already Verified Patient conversations. This backend
 does not grant Patient, Sales Invoice or Patient Encounter access or mark an app
-profile as medically verified. The current test user has no linked Patient and
-an Unverified conversation; the ERP team must provide approved verification and
-patient-scoped API access before private answers can be tested end to end.
+profile as medically verified. The former dev-sr.butest.tech test account had no
+linked Patient. On srdevportal.tech, the imported test Patient is now linked,
+but a profile link still does not replace ERP verification for private AI tools.
 
 Validation:
 
@@ -543,3 +543,60 @@ node --env-file=.env scripts/check-dev-readiness.mjs
 The readiness check is read-only and reports unrelated patient/order access
 blocks separately. An authenticated live chat test is still needed to verify
 ERP workers, provider settings and automatic replies.
+
+
+## Fresh ERP test data (srdevportal.tech)
+
+The October 13 test migration uses `export-local-app-test.py` and
+`import-local-app-test.mjs`. The export is restricted to the local Jagmohan test
+account, its two known invoices, related products/kit, diet mapping/PDF,
+encounters, assessment, support ticket, and two practitioners/schedules.
+It excludes sessions, credentials, unrelated patients, and integration settings.
+Keep the export and its receipt outside Git. The current private export is
+`/tmp/siya-local-app-test.json` in the local Ubuntu WSL instance.
+
+The importer is restricted to srdevportal.tech, preserves existing definitions,
+keeps a resumable source-to-target receipt, and tags migrated clinical/financial
+records with a unique Local Test Source. Copied invoices use the separate
+`Siya Ayurveda (Demo)` company, without stock movements or live shipment/payment
+creation. Two old placeholder diet SKUs without HSN codes are excluded; the
+purchased VitiCalm mapping is retained. Existing encounter data has no drug
+prescription, so no medication instructions are invented.
+
+```sh
+node --env-file=.env scripts/setup-dev-schema.mjs
+node --env-file=.env scripts/import-local-app-test.mjs /path/outside/git/siya-local-app-test.json
+node --env-file=.env scripts/setup-test-chat.mjs
+node --env-file=.env scripts/check-fresh-erp.mjs /path/outside/git/siya-local-app-test.json 2026-10-14
+```
+
+Run the exporter with the local bench Python from its `sites` directory.
+The importer continues independent records when invoice numbering is absent.
+The ERP's own validation requires its administrator to run, in the server bench:
+
+```sh
+bench --site srdevportal.tech set-config sales_invoice_series 'ACC-SINV-.YYYY.-'
+bench --site srdevportal.tech clear-cache
+```
+
+Invoices remain unimported until that setting exists. Purchase-based diet and
+habit screens remain empty until a mapped invoice is submitted. The user's
+manual test kit invoice should use Patient `HLC-PAT-2026-00001`, Customer
+`CUST-2026-00001`, Company `Siya Ayurveda (Demo)`, and Item Group Template
+`IGT-26-00001` (ultimate vitiligo kit): VitiCalm Cream 1499, Vitivitals 1299,
+Viti Tab 1299, quantity one each, total INR 4097. A single-product invoice is
+VitiCalm Cream, quantity one, INR 1499, without a kit template.
+
+Verified on October 13: 115 backend tests and 72 selected Flutter tests passed;
+live patient/profile links, assessment/support history, both apps' doctors and
+photos, appointment availability, product images/reorder IDs, and ERP QuickLink
+replies with three product cards passed. The imported diet PDF is readable but
+is not yet assigned through a purchase. Mobile chat channels now have the
+existing ERP AI policy assigned (without it, provider timeouts were zero).
+No private-patient verification status was changed.
+
+Remaining configuration: invoice series; ERP S3 storage for the existing mobile
+profile/treatment-image flow; appointment webhook credentials/payment test keys
+and Shopify discount credentials in the backend. Paid booking, discount creation,
+device login, and private AI patient answers were not verified live. The
+read-only check writes a private JSON validation report next to the export.

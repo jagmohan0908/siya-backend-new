@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {Erp} from '../src/erp.mjs';
 
 const erp = new Erp({url:process.env.ERP_URL,token:process.env.ERP_TOKEN});
-assert.equal(new URL(erp.url).hostname,'dev-sr.butest.tech','Dev schema setup is restricted to the dev ERP');
+assert.ok(['dev-sr.butest.tech','srdevportal.tech'].includes(new URL(erp.url).hostname),'Schema setup is restricted to the approved test ERPs');
 const schema = JSON.parse(await readFile(new URL('../erp/item-group-template-schema.json',import.meta.url),'utf8'));
 for (const doc of schema.doctypes) {
   if (!await erp.maybe('DocType',doc.name)) {

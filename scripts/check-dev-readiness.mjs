@@ -4,7 +4,7 @@ import {Erp} from '../src/erp.mjs';
 import {MobileService} from '../src/service.mjs';
 
 const erp = new Erp({url:process.env.ERP_URL,token:process.env.ERP_TOKEN});
-assert.equal(new URL(erp.url).hostname,'dev-sr.butest.tech');
+assert.ok(['dev-sr.butest.tech','srdevportal.tech'].includes(new URL(erp.url).hostname),'Use an approved test ERP');
 const service = new MobileService({erp});
 const results=[];
 async function check(name,run) {
@@ -12,6 +12,15 @@ async function check(name,run) {
   catch(error) { results.push({name,status:'BLOCKED',reason:error.message}); }
 }
 await check('ERP authentication',()=>erp.method('frappe.auth.get_logged_user'));
+await check('ERP invoice numbering configuration',async()=>{
+  const config=await erp.method('sriaas_clinic.api.sales_invoice.get_sales_invoice_series_config');
+  assert.ok(config.sales_invoice_series,'ERP administrator must configure sales_invoice_series in site config');
+});
+for(const account of ['Siya Ayurveda Patient App','Seedfit Patient App'])await check(`${account} configuration`,async()=>{
+  const channel=await erp.get('Chat Channel Account',account);
+  assert.ok(channel.channel_type==='Mobile App' && channel.is_active,'An active Mobile App channel is required');
+  assert.ok(channel.ai_policy_bundle,'Assign an existing active ERP AI policy to this channel');
+});
 for(const app of ['siya-ayurveda','seedfit']) await check(`${app} doctors`,async()=>{
   assert.ok((await service.doctors(app)).doctors.length,'No doctors are tagged for this app');
 });
