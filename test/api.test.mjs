@@ -855,6 +855,9 @@ test('online and OPD bookings charge and persist their own ERP prices in both ap
         await erp.update('Healthcare Practitioner','Megha',{sr_diseases:[{disease:'Siya Ayurveda'},{disease:'Seedfit'}],
           custom_accept_online_appointments:1,op_consulting_charge:opdFee,custom_online_consulting_charge:onlineFee});
         const fee=mode==='opd'?opdFee:onlineFee;
+        const profile=(await service.doctors(appId)).doctors[0];
+        assert.equal(profile.consultationFee,opdFee);
+        assert.equal(profile.isFreeConsultation,opdFee===0);
         const body={...booking,consultationType:mode,consultationFee:fee};
         await assert.rejects(service.createAppointment(user,{...body,consultationFee:fee+1},true,appId),{code:'doctor_fee_changed'});
         if(fee>0) {
@@ -880,7 +883,9 @@ test('enabled online price is required and never falls back to an OPD charge',as
   }
   const {erp,service}=setup();
   await erp.update('Healthcare Practitioner','Megha',{custom_accept_opd_appointments:0,op_consulting_charge:null,custom_accept_online_appointments:1,custom_online_consulting_charge:150});
-  assert.equal((await service.doctors()).doctors[0].consultationFees.video,150);
+  const onlineOnly=(await service.doctors()).doctors[0];
+  assert.equal(onlineOnly.consultationFees.video,150);
+  assert.equal(onlineOnly.consultationFee,150);
 });
 
 test('Meet links follow current ERP data and never appear on OPD bookings',async()=>{

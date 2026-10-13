@@ -104,7 +104,7 @@ export class MobileService {
     };
     const opdFee = charge(doc.op_consulting_charge, opd);
     const onlineFee = charge(doc.custom_online_consulting_charge, online);
-    const fee = online ? onlineFee : opdFee;
+    const fee = opd ? opdFee : onlineFee;
     return {id:doc.name, name:doc.practitioner_name || doc.name,
       specialization:qualification || doc.department || '', qualification,
       imageUrl:doc.image ? `/v1/doctors/${encodeURIComponent(doc.name)}/photo?app=${encodeURIComponent(appId)}&v=${encodeURIComponent(doc.modified || doc.image)}` : '',
