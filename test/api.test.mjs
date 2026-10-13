@@ -929,6 +929,60 @@ test('a delayed ERP Meet link repairs the owned reservation without rebooking',a
   assert.equal((await erp.get('Mobile App Appointment',saved.reservation)).is_online,0);
 });
 
+test('backend creates one meeting, saves it in both ERP records and returns the saved link',async()=>{
+  let generated=0,webhookLink;
+  const link='https://meet.google.com/abc-defg-hij';
+  const {erp,service}=setup({webhookUrl:'https://webhook.test',meetings:{configured:true,create:async()=>{generated++;return link;}}});
+  await erp.update('Healthcare Practitioner','Megha',{custom_accept_online_appointments:1});
+  service.fetcher=async(_,request)=>{
+    const body=JSON.parse(request.body);webhookLink=body.meetingLink;
+    return Response.json({data:await erp.create('Patient Encounter',{
+      doctype:'Patient Encounter',patient:'patient-test',pe_practitioner:'Megha',sr_encounter_place:'Online',
+      sr_notes:`External appointment ID: ${booking.id}`,custom_appointment_status:'Approved',
+    })});
+  };
+  const result=await service.createAppointment(user,{...booking,appointmentDate:'2030-10-15',consultationType:'video'});
+  assert.equal(result.meetingLink,link);assert.equal(webhookLink,link);assert.equal(generated,1);
+  assert.equal((await erp.get('Patient Encounter',result.erpEncounterId)).google_meet_link,link);
+  const reservation=await erp.get('Mobile App Appointment',result.reservation);
+  assert.equal(reservation.consultation_type,link);assert.equal(reservation.is_online,1);
+  assert.equal((await service.appointments(user)).items[0].meetingLink,link);assert.equal(generated,1);
+  await erp.update('Patient Encounter',result.erpEncounterId,{google_meet_link:null});
+  assert.equal((await service.appointments(user)).items[0].meetingLink,null);
+  assert.equal(generated,1);
+});
+
+test('a script timeout is not replayed and OPD bookings never call Google',async()=>{
+  for(const mode of ['opd','video']) {
+    let requests=0;
+    const {erp,service}=setup({webhookUrl:'https://webhook.test',fetcher:async()=>Response.json({}),
+      meetings:{configured:true,create:async()=>{requests++;throw Error('timeout');}}});
+    await erp.update('Healthcare Practitioner','Megha',{custom_accept_online_appointments:1});
+    const result=await service.createAppointment(user,{...booking,appointmentDate:'2030-10-15',consultationType:mode});
+    assert.equal(result.status,'confirmed');assert.ok(!result.meetingLink);
+    await service.appointments(user);await service.appointments(user);
+    assert.equal(requests,mode==='video'?1:0);
+  }
+});
+
+test('ERP save retries reuse the generated link and require successful readback',async()=>{
+  let requests=0,failSave=true;
+  const link='https://meet.google.com/abc-defg-hij';
+  const {erp,service}=setup({webhookUrl:'https://webhook.test',fetcher:async()=>Response.json({}),
+    meetings:{configured:true,create:async()=>{requests++;return link;}}});
+  await erp.update('Healthcare Practitioner','Megha',{custom_accept_online_appointments:1});
+  const update=erp.update.bind(erp);
+  erp.update=async(type,name,fields)=>{
+    if(type==='Mobile App Appointment' && fields.google_meet_link && failSave) return erp.get(type,name);
+    return update(type,name,fields);
+  };
+  const result=await service.createAppointment(user,{...booking,appointmentDate:'2030-10-15',consultationType:'video'});
+  assert.equal(result.meetingLink,null);assert.equal(result.meetingState,'saving');
+  failSave=false;
+  const refreshed=(await service.appointments(user)).items[0];
+  assert.equal(refreshed.meetingLink,link);assert.equal(requests,1);
+});
+
 test('doctor photos serve only the selected practitioner attachment and reject non-image content',async()=>{
   const {erp,service}=setup();
   await erp.update('Healthcare Practitioner','Megha',{image:'/files/doctor.jpg'});

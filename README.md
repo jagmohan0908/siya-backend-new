@@ -162,8 +162,8 @@ and `bookingSyncPending: false`; the app displays "Booking confirmed" and
 
 Encounter synchronization is separate (`encounterSyncPending: true` until linked).
 The webhook must return the saved Patient Encounter (single object or one-item
-array), retain `External appointment ID: <id>` in `sr_notes`, and persist the video
-Meet link in ERP's `google_meet_link`. The backend rereads that encounter before
+array) and retain `External appointment ID: <id>` in `sr_notes`. The backend saves
+the video Meet link into ERP's `google_meet_link` after linking the encounter. It rereads that encounter before
 linking it. A newly created Pending encounter does not downgrade a confirmed
 reservation. Clinic cancellation, check-in and completion remain distinct states.
 A webhook timeout does not undo a confirmed reservation or trigger another POST.
@@ -321,21 +321,33 @@ saved quote. The app retains its statistics and reviews for existing doctors.
 - The existing appointment webhook creates/links `Patient Encounter`. Online
   encounters must use `sr_encounter_type=Appointment` and
   `sr_encounter_place=Online`; in-person encounters use `OPD`.
-- The existing `clinic_appointments` Google Calendar integration generates Meet
-  links for online encounters when its server OAuth configuration is valid.
-  It stores `Patient Encounter.google_meet_link` and
-  `google_calendar_event_id`, and synchronizes them to `Clinic Appointment`.
-  This backend does not generate Meet links or configure Google OAuth.
+- The backend calls Siya's existing Google Apps Script Meet deployment after
+  confirming an authenticated, paid/free video booking. `GOOGLE_MEET_SCRIPT_URL`
+  optionally overrides that deployment; no Google OAuth keys are needed in the
+  backend because the script uses its existing Google authorization.
+- Before delivering the booking webhook, the backend saves the returned link in
+  `Mobile App Appointment.google_meet_link` and sets `consultation_type` to the
+  real URL (the current ERP requires this to retain `is_online=1`). Once the
+  webhook links the encounter, the backend also saves and rereads
+  `Patient Encounter.google_meet_link`. ERP's existing sync copies it into
+  `Clinic Appointment`. Existing linked bookings can be repaired on refresh.
+- A separate `Siya Mobile Record` (`kind=appointment_meet`) journals generation.
+  ERP save retries reuse the generated link. A timed-out provider POST is never
+  blindly repeated because the legacy script's idempotency is not verified.
+  Such requests stay `needs_review`. Once synchronized, a cleared encounter link
+  is not restored from the journal. OPD/cancelled/unpaid bookings never generate
+  a meeting. No patient email or attendee list is sent to the script.
 - The app reads the linked encounter's current `google_meet_link`; until an
   encounter is linked, it can read the owned Mobile App Appointment's link.
   Cleared/invalid links do not fall back to an old cached link. Only video
   bookings receive a Google Meet action; OPD bookings do not.
 
-Live audit on 2026-10-13 confirmed the two mode flags and separate online charge
-on srdevportal.tech. The scoped test patient has OPD encounters only, so live
-online event creation and the dev server's Google OAuth configuration remain
-unverified. Unit tests exercise price selection, payment amounts, mode flags and
-Meet-link reads without sending real Google invitations or charging a patient.
+Live verification on 2026-10-13 confirmed that the existing Apps Script returns
+a real Meet URL and that it saves in Patient Encounter, Mobile App Appointment,
+and Clinic Appointment. ERP's separate Calendar OAuth integration reported
+`invalid_grant`; backend generation does not depend on repairing that token.
+The existing ERP encounter-save hooks still run; this change installs no ERP
+module and changes no Google credentials on the ERP server.
 
 `GET /v1/doctors/:id/photo` serves only the selected image attached to that
 practitioner, via authenticated ERP download. Local ERP images and S3 images are

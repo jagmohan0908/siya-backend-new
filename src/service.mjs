@@ -10,6 +10,7 @@ import {Assessments, assessmentApp} from './assessments.mjs';
 import {habitOrders, habitPrescriptions} from './invoice-habits.mjs';
 import {invoiceKit} from './invoice-kit.mjs';
 import {getErpHabitTracker,saveErpHabitTracker} from './erp-habit-tracker.mjs';
+import {prepareAppointmentMeet} from './appointment-meet.mjs';
 
 const day = () => new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit'}).format(new Date());
 const statuses = {Pending: 'pending', Approved: 'confirmed', Confirmed: 'confirmed', 'Checked In': 'checked_in', Completed: 'completed', Cancelled: 'cancelled'};
@@ -32,9 +33,9 @@ const doctorTag = appId => {
 };
 
 export class MobileService {
-  constructor({erp, webhookUrl, webhookSecret, fetcher = fetch, rewardIssuer, payments, productImage = async () => '', productCatalog, chatProducts,
+  constructor({erp, webhookUrl, webhookSecret, fetcher = fetch, rewardIssuer, payments, meetings, productImage = async () => '', productCatalog, chatProducts,
     s3PresignMethod = 'sriaas_clinic.api.s3.presign.get_presigned_url'}) {
-    Object.assign(this, {erp, webhookUrl, webhookSecret, fetcher, rewardIssuer, payments, productImage, productCatalog, chatProducts, s3PresignMethod});
+    Object.assign(this, {erp, webhookUrl, webhookSecret, fetcher, rewardIssuer, payments, meetings, productImage, productCatalog, chatProducts, s3PresignMethod});
     this.records = new Records(erp); this.queue = new SerialQueue();
     this.assessments = new Assessments(erp);
     this.support = new SupportTickets(this);
@@ -288,6 +289,11 @@ export class MobileService {
       record=await this.records.write(user.id,'appointment',record.data.id,{...record.data,paymentId,paymentStatus:'paid'},record.revision);
     }
     record = await this.confirmReservation(user, record);
+    if (this.meetings && record.data.consultationType === 'video') {
+      const reservation = await this.bookingReservation(user,record.data);
+      const prepared = await prepareAppointmentMeet(this,user,record.data,null,reservation);
+      record = await this.records.write(user.id,'appointment',record.data.id,prepared,record.revision);
+    }
     const saved=record.data; const id=saved.id; const identity=await this.identity(user);
     // Persist intent before external delivery. Uncertain delivery is reconciled, never blindly replayed.
     record = await this.records.write(user.id, 'appointment', id, {...saved, deliveryState: 'sent'}, record.revision);
@@ -337,7 +343,7 @@ export class MobileService {
     // Do not automatically grant access to a historical patient matched by phone inside n8n.
     // An existing explicit account->Patient mapping remains the authority for records/invoices.
     const saved = await this.records.write(user.id, 'appointment', data.id, data, record.revision);
-    return saved.data;
+    return this.meetings ? this.refreshAppointment(user,saved) : saved.data;
   }
   reservationBookingData(reservation, data) {
     const status = appointmentStatus(reservation.status);
@@ -359,7 +365,14 @@ export class MobileService {
     }
     if (record.data.erpEncounterId) {
       const enc = await this.erp.get('Patient Encounter', record.data.erpEncounterId);
-      const data = {...record.data, status: this.encounterBookingStatus(enc, record.data)};
+      let data = {...record.data, status: this.encounterBookingStatus(enc, record.data)};
+      if (this.meetings && reservation) data = await prepareAppointmentMeet(this,user,data,enc,reservation);
+      if (data.meetingState && data.meetingState !== 'ready') return {...data,meetingLink:null};
+      // Provisioning writes ERP, so reread before exposing its link or syncing flags.
+      if (data.meetingState === 'ready') {
+        const current = await this.erp.get('Patient Encounter',enc.name);
+        return {...data,meetingLink:appointmentMeetLink(data,current.google_meet_link)};
+      }
       const meetingLink = appointmentMeetLink(data, enc.google_meet_link);
       // A Google link can arrive after the webhook has finished. Keep the owned ERP
       // reservation in sync when the app refreshes, without creating another meeting.
@@ -375,6 +388,7 @@ export class MobileService {
       const matches = await this.erp.list('Patient Encounter', {sr_notes: ['like', `%External appointment ID: ${record.data.id}%`]}, ['name'], {limit: 2});
       if (matches.length === 1) return this.attachEncounter(user, record, matches[0].name);
     }
+    if (this.meetings && reservation) return prepareAppointmentMeet(this,user,record.data,null,reservation);
     return record.data;
   }
   async appointments(user) {

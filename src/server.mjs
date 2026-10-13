@@ -5,6 +5,7 @@ import {createAuthenticator} from './auth.mjs';
 import {MobileService} from './service.mjs';
 import {createRewardIssuer} from './shopify.mjs';
 import {Razorpay} from './payments.mjs';
+import {AppsScriptMeet} from './appointment-meet.mjs';
 import {createProductCatalog} from './product-images.mjs';
 import {createChatProductSearch} from './chat-products.mjs';
 import {ApiError, requireValue} from './errors.mjs';
@@ -121,6 +122,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     s3PresignMethod:process.env.S3_PRESIGN_METHOD,
     productCatalog,productImage:async item=>(await productCatalog(item)).imageUrl,
     payments:new Razorpay({keyId:process.env.RAZORPAY_KEY_ID,keySecret:process.env.RAZORPAY_KEY_SECRET}),
+    meetings:new AppsScriptMeet({url:process.env.GOOGLE_MEET_SCRIPT_URL}),
     webhookSecret:process.env.APPOINTMENT_WEBHOOK_SECRET,rewardIssuer:createRewardIssuer({domain:process.env.SHOPIFY_DOMAIN,adminToken:process.env.SHOPIFY_ADMIN_TOKEN})});
   const server = createApi({service,authenticate:createAuthenticator({domain:process.env.SHOPIFY_DOMAIN,storefrontToken:process.env.SHOPIFY_STOREFRONT_TOKEN}),
     allowBookings:process.env.BOOKINGS_ENABLED === 'true',
