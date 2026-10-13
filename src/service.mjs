@@ -17,6 +17,14 @@ export const appointmentStatus = value => statuses[value] || 'pending';
 const cleanProfile = data => Object.fromEntries(['name','gender','dateOfBirth','height','weight'].filter(k => data[k] != null).map(k => [k, text(String(data[k]), 150)]));
 const patientGenders = new Set(['Male','Female','Other','Prefer not to say','Non-Conforming','Genderqueer','Transgender']);
 const appointmentDepartment = 'Skin/Fertility/Liver/IBS';
+const appointmentMeetLink = (data, value) => {
+  if (data.consultationType !== 'video' || data.status === 'cancelled' || typeof value !== 'string') return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && url.hostname === 'meet.google.com' && !url.username && !url.password && !url.port
+      ? url.href : null;
+  } catch { return null; }
+};
 const appDoctorTags = new Map([['siya-ayurveda', 'Siya Ayurveda'], ['seedfit', 'Seedfit']]);
 const doctorTag = appId => {
   requireValue(appDoctorTags.has(appId), 'Unknown app ID',400,'invalid_app');
@@ -84,16 +92,23 @@ export class MobileService {
     const tag = doctorTag(appId);
     const doc = await this.erp.get('Healthcare Practitioner', row.id);
     if (doc.status !== 'Active' || !(doc.sr_diseases || []).some(d => d.disease === tag)) return null;
-    const fee = doc.op_consulting_charge;
-    requireValue(fee !== null && fee !== undefined && fee !== '' && Number.isFinite(Number(fee)) && Number(fee) >= 0,
-      'The clinic needs to configure this doctor\'s consultation charge.',503,'doctor_fee_unavailable');
     const qualification = doc.sr_qualification || '';
     const opd = Number(doc.custom_accept_opd_appointments ?? 1) === 1;
     const online = Number(doc.custom_accept_online_appointments) === 1;
+    const charge = (value, enabled) => {
+      if (!enabled) return null;
+      requireValue(value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) && Number(value) >= 0,
+        'The clinic needs to configure this doctor\'s consultation charge.',503,'doctor_fee_unavailable');
+      return Math.round(Number(value)*100)/100;
+    };
+    const opdFee = charge(doc.op_consulting_charge, opd);
+    const onlineFee = charge(doc.custom_online_consulting_charge, online);
+    const fee = online ? onlineFee : opdFee;
     return {id:doc.name, name:doc.practitioner_name || doc.name,
       specialization:qualification || doc.department || '', qualification,
       imageUrl:doc.image ? `/v1/doctors/${encodeURIComponent(doc.name)}/photo?app=${encodeURIComponent(appId)}&v=${encodeURIComponent(doc.modified || doc.image)}` : '',
-      consultationFee:Math.round(Number(fee)*100)/100, isFreeConsultation:Number(fee) === 0,
+      consultationFee:fee, isFreeConsultation:fee === 0,
+      consultationFees:{opd:opdFee,video:onlineFee,audio:onlineFee},
       about:doc.custom_about_doctor || '', isAvailable:opd || online,
       acceptsOpdAppointments:opd, acceptsOnlineAppointments:online,
       availableDays:[...new Set((row.schedules || []).flatMap(s=>s.days))].map(v=>v.slice(0,3)),
@@ -183,10 +198,11 @@ export class MobileService {
     const mode = text(body.consultationType);
     requireValue(['video','opd','audio'].includes(mode) && (profile.availableConsultationType === 'all' || profile.availableConsultationType === mode ||
       (profile.availableConsultationType === 'online' && ['video','audio'].includes(mode))), 'Consultation type not available');
-    requireValue(body.consultationFee == null || Number(body.consultationFee) === profile.consultationFee,
+    const fee = profile.consultationFees[mode];
+    requireValue(body.consultationFee == null || Number(body.consultationFee) === fee,
       'The consultation charge has changed. Refresh the doctor details before booking.',409,'doctor_fee_changed');
-    requireValue(profile.consultationFee === 0 || this.payments?.keyId, 'Payments are temporarily unavailable. No payment was taken.', 503, 'payment_setup_required');
-    requireValue(profile.consultationFee === 0 || prepare, 'Prepare your appointment payment first',409);
+    requireValue(fee === 0 || (this.payments?.keyId && this.payments.configured !== false), 'Payments are temporarily unavailable. No payment was taken.', 503, 'payment_setup_required');
+    requireValue(fee === 0 || prepare, 'Prepare your appointment payment first',409);
     const date = text(body.appointmentDate).slice(0,10);
     const time = text(body.time, 8);
     const reservationName = `SIYA-${recordName(user.id, 'appointment', id).slice(0,32)}`;
@@ -207,7 +223,7 @@ export class MobileService {
     if (!reservation) reservation = await this.erp.create('Mobile App Appointment', {
       appointment_external_id: reservationName, booking_id: id, mobile_app_user: identity.erpUser,
       practitioner_id: doctor, practitioner_schedule: slot.schedule_id, appointment_date: date, appointment_time: time,
-      duration: slot.duration, status: 'Pending', consultation_type: mode, patient_name: patientName,
+      duration: slot.duration, status: 'Pending', consultation_type: mode, is_online: mode === 'opd' ? 0 : 1, patient_name: patientName,
       mobile_number: patientPhone, email: user.email,
       payload_json: JSON.stringify({source: 'siya-mobile-api', appId, id, patientGender, department: appointmentDepartment}),
     });
@@ -216,13 +232,15 @@ export class MobileService {
       timeSlot: `${String(Number(time.slice(0,2)) % 12 || 12).padStart(2,'0')}:${time.slice(3,5)} ${Number(time.slice(0,2)) < 12 ? 'AM' : 'PM'}`,
       consultationType: mode, patientName, patientPhone, patientEmail: user.email,
       patientGender, department: appointmentDepartment,
-      symptoms: text(body.symptoms || '', 4000), consultationFee: profile.consultationFee, status: 'pending',
-      createdAt: new Date().toISOString(), paymentStatus: profile.consultationFee === 0 ? 'free' : 'pending', paymentId: profile.consultationFee === 0 ? `FREE-${id}` : null,
+      symptoms: text(body.symptoms || '', 4000), consultationFee: fee, status: 'pending',
+      createdAt: new Date().toISOString(), paymentStatus: fee === 0 ? 'free' : 'pending', paymentId: fee === 0 ? `FREE-${id}` : null,
       reservation: reservationName, bookingSyncPending: true, deliveryState: 'not_sent'};
     const record = await this.records.write(user.id, 'appointment', id, saved, 0);
     return prepare ? this.paymentOrder(user,record) : this.deliverAppointment(user,record,body.paymentId);
   }
   async paymentOrder(user, record) {
+    requireValue(this.payments?.keyId && this.payments.configured !== false,
+      'Payments are temporarily unavailable. No payment was taken.',503,'payment_setup_required');
     requireValue(record.data.consultationFee > 0 && this.payments?.keyId,'Payment is not available',503);
     if (record.data.paymentOrderId) return {orderId:record.data.paymentOrderId,keyId:this.payments.keyId,amount:record.data.consultationFee};
     requireValue(!record.data.paymentOrderRequested,'Payment preparation is pending. Contact the clinic before retrying.',409,'payment_order_pending');
@@ -308,7 +326,7 @@ export class MobileService {
     record = {...record,data:this.reservationBookingData(reservation,record.data)};
     const data = {...record.data, erpEncounterId: encounter.name, erpPatientId: encounter.patient,
       erpAppointmentReference: encounter.encounter_reference, status: this.encounterBookingStatus(encounter, record.data),
-      meetingLink: encounter.google_meet_link || null, bookingSyncPending: false, encounterSyncPending: false, deliveryState: 'acknowledged'};
+      meetingLink: appointmentMeetLink(record.data, encounter.google_meet_link), bookingSyncPending: false, encounterSyncPending: false, deliveryState: 'acknowledged'};
     await this.erp.update('Mobile App Appointment', data.reservation, {patient_encounter: encounter.name,modified:reservation.modified});
     // Do not automatically grant access to a historical patient matched by phone inside n8n.
     // An existing explicit account->Patient mapping remains the authority for records/invoices.
@@ -330,10 +348,12 @@ export class MobileService {
     if (record.data.reservation) {
       const reservation = await this.bookingReservation(user, record.data);
       record = {...record,data:this.reservationBookingData(reservation,record.data)};
+      record.data.meetingLink = appointmentMeetLink(record.data, reservation.google_meet_link);
     }
     if (record.data.erpEncounterId) {
       const enc = await this.erp.get('Patient Encounter', record.data.erpEncounterId);
-      return {...record.data, status: this.encounterBookingStatus(enc, record.data), meetingLink: enc.google_meet_link || record.data.meetingLink};
+      const data = {...record.data, status: this.encounterBookingStatus(enc, record.data)};
+      return {...data, meetingLink: appointmentMeetLink(data, enc.google_meet_link)};
     }
     if (record.data.deliveryState === 'sent') {
       const matches = await this.erp.list('Patient Encounter', {sr_notes: ['like', `%External appointment ID: ${record.data.id}%`]}, ['name'], {limit: 2});

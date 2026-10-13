@@ -9,7 +9,7 @@ import {Razorpay} from '../src/payments.mjs';
 import {isPerfectDay} from '../src/habits.mjs';
 
 class FakeErp {
-  constructor() { this.docs = new Map([['Healthcare Practitioner/Megha',{name:'Megha',practitioner_name:'Megha',status:'Active',sr_diseases:[{disease:'Siya Ayurveda'}],op_consulting_charge:0,custom_accept_online_appointments:0}]]); this.created = []; this.url = 'https://erp.test'; this.calendar = new Map(); this.cancelCalls = []; }
+  constructor() { this.docs = new Map([['Healthcare Practitioner/Megha',{name:'Megha',practitioner_name:'Megha',status:'Active',sr_diseases:[{disease:'Siya Ayurveda'}],op_consulting_charge:0,custom_online_consulting_charge:0,custom_accept_online_appointments:0}]]); this.created = []; this.url = 'https://erp.test'; this.calendar = new Map(); this.cancelCalls = []; }
   async maybe(type,name) { return this.docs.get(`${type}/${name}`) || null; }
   async get(type,name) { const value = await this.maybe(type,name); if (!value) throw new ApiError(404,'not_found','Not found'); return structuredClone(value); }
   async create(type,doc) {
@@ -210,6 +210,17 @@ test('forged free price cannot bypass the backend doctor fee',async () => {
   const {service}=setup();await service.erp.update('Healthcare Practitioner','Megha',{op_consulting_charge:1000});
   await assert.rejects(service.createAppointment(user,{...booking,consultationFee:0,paymentStatus:'free'}),{code:'doctor_fee_changed'});
 });
+
+test('missing Razorpay secret fails before reserving a slot or locking payment preparation',async()=>{
+  const {service,erp}=setup({payments:new Razorpay({keyId:'rzp_test_example'}),webhookUrl:'https://webhook.test'});
+  await erp.update('Healthcare Practitioner','Megha',{op_consulting_charge:1});
+  await assert.rejects(service.createAppointment(user,{...booking,consultationFee:1},true),{code:'payment_setup_required'});
+  assert.equal(erp.created.length,0);
+  assert.equal(service.payments.configured,false);
+  const record=await service.records.write(user.id,'appointment',booking.id,{...booking,consultationFee:1},0);
+  await assert.rejects(service.paymentOrder(user,record),{code:'payment_setup_required'});
+  assert.equal((await service.records.read(user.id,'appointment',booking.id)).data.paymentOrderRequested,undefined);
+});
 test('a legacy clinic booking removes that slot',async () => {
   const {erp,service}=setup();await erp.create('Clinic Appointment',{practitioner:'Megha',appointment_date:booking.appointmentDate,appointment_time:'10:00:00'});
   assert.equal((await service.availability('Megha',booking.appointmentDate)).slots.length,0);
@@ -315,15 +326,16 @@ test('API requires authentication and returns safe errors',async t => {
 
 test('a verified webhook encounter is returned with the ERP meeting link and status',async () => {
   const {erp,service}=setup({webhookUrl:'https://webhook.test'});
+  await erp.update('Healthcare Practitioner','Megha',{custom_accept_online_appointments:1});
   service.fetcher=async () => {
     const enc=await erp.create('Patient Encounter',{doctype:'Patient Encounter',patient:'patient-test',docstatus:0,
       sr_notes:`External appointment ID: ${booking.id}`,custom_appointment_status:'Approved',google_meet_link:'https://meet.google.com/test-link'});
     return Response.json([{data:enc}]);
   };
-  const result=await service.createAppointment(user,booking);
+  const result=await service.createAppointment(user,{...booking,consultationType:'video'});
   assert.equal(result.bookingSyncPending,false);assert.equal(result.status,'confirmed');
   assert.equal(result.meetingLink,'https://meet.google.com/test-link');
-  const second=await service.createAppointment(user,booking);
+  const second=await service.createAppointment(user,{...booking,consultationType:'video'});
   assert.equal(second.erpEncounterId,result.erpEncounterId);
   assert.equal(erp.created.filter(row=>row.type==='Patient Encounter').length,1);
 });
@@ -826,6 +838,64 @@ test('current ERP fee wins over a stale client quote and supports fractional rup
   assert.equal(erp.created.length,0);
   const prepared=await service.createAppointment(user,{...booking,consultationFee:1000.5},true);
   assert.equal(charge,1000.5);assert.equal(prepared.amount,1000.5);
+});
+
+test('online and OPD bookings charge and persist their own ERP prices in both apps',async()=>{
+  for(const appId of ['siya-ayurveda','seedfit']) {
+    for(const [opdFee,onlineFee] of [[1,0],[0,499.5],[250,99]]) {
+      for(const mode of ['opd','video','audio']) {
+        let charged, payload;
+        const {erp,service}=setup({webhookUrl:'https://webhook.test',
+          fetcher:async(_,request)=>{payload=JSON.parse(request.body);return Response.json({});},
+          payments:{keyId:'test',create:async(_,a)=>{charged=a.consultationFee;return {id:'order_test'};},verify:async()=>{}}});
+        await erp.update('Healthcare Practitioner','Megha',{sr_diseases:[{disease:'Siya Ayurveda'},{disease:'Seedfit'}],
+          custom_accept_online_appointments:1,op_consulting_charge:opdFee,custom_online_consulting_charge:onlineFee});
+        const fee=mode==='opd'?opdFee:onlineFee;
+        const body={...booking,consultationType:mode,consultationFee:fee};
+        await assert.rejects(service.createAppointment(user,{...body,consultationFee:fee+1},true,appId),{code:'doctor_fee_changed'});
+        if(fee>0) {
+          const order=await service.createAppointment(user,body,true,appId);
+          assert.equal(order.amount,fee);assert.equal(charged,fee);
+        }
+        const saved=await service.createAppointment(user,{...body,paymentId:'payment_test'},false,appId);
+        assert.equal(saved.consultationFee,fee);assert.equal(payload.fee,fee);assert.equal(payload.consultationType,mode);
+        assert.equal(saved.paymentStatus,fee===0?'free':'paid');
+        const reservation=await erp.get('Mobile App Appointment',saved.reservation);
+        assert.equal(reservation.is_online,mode==='opd'?0:1);
+      }
+    }
+  }
+});
+
+test('enabled online price is required and never falls back to an OPD charge',async()=>{
+  for(const fee of [null,undefined,'','invalid',-1]) {
+    const {erp,service}=setup();
+    await erp.update('Healthcare Practitioner','Megha',{custom_accept_online_appointments:1,custom_online_consulting_charge:fee});
+    await assert.rejects(service.createAppointment(user,{...booking,consultationType:'video'}),{code:'doctor_fee_unavailable'});
+    assert.equal(erp.created.length,0);
+  }
+  const {erp,service}=setup();
+  await erp.update('Healthcare Practitioner','Megha',{custom_accept_opd_appointments:0,op_consulting_charge:null,custom_accept_online_appointments:1,custom_online_consulting_charge:150});
+  assert.equal((await service.doctors()).doctors[0].consultationFees.video,150);
+});
+
+test('Meet links follow current ERP data and never appear on OPD bookings',async()=>{
+  for(const mode of ['opd','video']) {
+    const {erp,service}=setup({webhookUrl:'https://webhook.test',fetcher:async()=>Response.json({})});
+    await erp.update('Healthcare Practitioner','Megha',{custom_accept_online_appointments:1});
+    const saved=await service.createAppointment(user,{...booking,consultationType:mode});
+    const record=await service.records.read(user.id,'appointment',booking.id);
+    const link='https://meet.google.com/abc-defg-hij';
+    await erp.update('Mobile App Appointment',saved.reservation,{google_meet_link:link});
+    assert.equal((await service.refreshAppointment(user,record)).meetingLink,mode==='video'?link:null);
+    const encounter=await erp.create('Patient Encounter',{google_meet_link:link,custom_appointment_status:'Approved'});
+    const linked={...record,data:{...record.data,erpEncounterId:encounter.name,meetingLink:link}};
+    assert.equal((await service.refreshAppointment(user,linked)).meetingLink,mode==='video'?link:null);
+    for(const invalid of ['',null,'https://meet.google.com.evil.test/abc','javascript:alert(1)']) {
+      await erp.update('Patient Encounter',encounter.name,{google_meet_link:invalid});
+      assert.equal((await service.refreshAppointment(user,linked)).meetingLink,null);
+    }
+  }
 });
 
 test('doctor photos serve only the selected practitioner attachment and reject non-image content',async()=>{

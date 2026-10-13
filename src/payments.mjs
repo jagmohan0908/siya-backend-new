@@ -1,8 +1,9 @@
 import {requireValue} from './errors.mjs';
 export class Razorpay {
   constructor({keyId,keySecret,fetcher=fetch}) { Object.assign(this,{keyId,keySecret,fetcher}); }
+  get configured() { return Boolean(this.keyId?.trim() && this.keySecret?.trim()); }
   async request(path,body) {
-    requireValue(this.keyId && this.keySecret,'Payments are temporarily unavailable. No payment was taken.',503,'payment_setup_required');
+    requireValue(this.configured,'Payments are temporarily unavailable. No payment was taken.',503,'payment_setup_required');
     const response=await this.fetcher(`https://api.razorpay.com/v1/${path}`,{
       method:body?'POST':'GET',headers:{Authorization:`Basic ${Buffer.from(`${this.keyId}:${this.keySecret}`).toString('base64')}`,'Content-Type':'application/json'},
       body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(20000),redirect:'error'});

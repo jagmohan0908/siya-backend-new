@@ -294,7 +294,11 @@ ERP authentication remains required.
 
 
 Doctor details and charges are read from Healthcare Practitioner records on each
-refresh and before new bookings. `op_consulting_charge` applies to consultations;
+refresh and before new bookings. `op_consulting_charge` applies to OPD;
+`custom_online_consulting_charge` applies to video/audio. The API's
+`consultationFees` contains the separate `opd`, `video`, and `audio` prices.
+Clients must use the selected mode's price for display and payment preparation.
+Zero is a free visit; missing/invalid charges for an enabled mode block booking.
 `custom_accept_opd_appointments` and `custom_accept_online_appointments` independently
 control OPD and online (video/audio). The API returns `opd`, `online`, `all`, or
 `none` as `availableConsultationType`, plus both boolean flags. With neither
@@ -303,6 +307,35 @@ Older ERP installations without the OPD field retain their previous OPD default.
 The app refreshes these settings and rechecks them before booking. Active practitioners with ERP schedules/exceptions and the requesting app's disease tag appear automatically.
 No static doctor price or mode policy is used. Existing paid bookings retain their
 saved quote. The app retains its statistics and reviews for existing doctors.
+
+### Appointment and Google Meet storage
+
+- `Healthcare Practitioner` owns mode switches and prices. The Doctor Clinical
+  page edits these values; selecting OPD/Online in the app uses them immediately
+  after refresh and carries the selection into booking.
+- `Mobile App Appointment` stores the account, practitioner, time,
+  `consultation_type`, `is_online`, status and linked `patient_encounter`.
+- `Siya Mobile Record` (`kind=appointment`) stores the account-owned booking,
+  selected mode, quoted fee, payment state and ERP references. Flutter Hive is
+  a local cache/pending-save store; the API refreshes ERP records.
+- The existing appointment webhook creates/links `Patient Encounter`. Online
+  encounters must use `sr_encounter_type=Appointment` and
+  `sr_encounter_place=Online`; in-person encounters use `OPD`.
+- The existing `clinic_appointments` Google Calendar integration generates Meet
+  links for online encounters when its server OAuth configuration is valid.
+  It stores `Patient Encounter.google_meet_link` and
+  `google_calendar_event_id`, and synchronizes them to `Clinic Appointment`.
+  This backend does not generate Meet links or configure Google OAuth.
+- The app reads the linked encounter's current `google_meet_link`; until an
+  encounter is linked, it can read the owned Mobile App Appointment's link.
+  Cleared/invalid links do not fall back to an old cached link. Only video
+  bookings receive a Google Meet action; OPD bookings do not.
+
+Live audit on 2026-10-13 confirmed the two mode flags and separate online charge
+on srdevportal.tech. The scoped test patient has OPD encounters only, so live
+online event creation and the dev server's Google OAuth configuration remain
+unverified. Unit tests exercise price selection, payment amounts, mode flags and
+Meet-link reads without sending real Google invitations or charging a patient.
 
 `GET /v1/doctors/:id/photo` serves only the selected image attached to that
 practitioner, via authenticated ERP download. Local ERP images and S3 images are
