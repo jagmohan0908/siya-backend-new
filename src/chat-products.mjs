@@ -1,7 +1,9 @@
 // Public catalogue matching only. No chat text or patient details leave for Shopify.
 const norm=s=>String(s || '').toLowerCase().normalize('NFKC');
 const groups=[['acne','pimple','pimples','मुंहासे'],['hair','dandruff','बाल'],['vitiligo','leucoderma','सफेद दाग'],['psoriasis','सोरायसिस']];
-const stop=new Set('siya ayurveda product products treatment kit for with and the cream oil tablets shampoo buy price show tell please recommend want need hai mujhe chahiye best'.split(' '));
+// Generic service words also occur in product titles (e.g. "fertility support").
+// They must not turn a support/availability question into product recommendations.
+const stop=new Set('siya ayurveda seedfit seed fit product products treatment kit for with and the cream oil tablets shampoo buy price show tell please recommend want need hai mujhe chahiye best support available availability confirm help chat agent customer team test testing integration hello thanks thank'.split(' '));
 const privateOrUsage=/\b(order|orders|invoice|tracking|shipment|awb|delivery|prescription|dose|dosage|take|usage|apply|safe|pregnan\w*|breastfeed\w*|child|children|baby|reaction|irritation|swelling|burning|side effects?|allerg\w*|kitni|kitna|lagana|refund|cancel|return)\b|how (?:do i |to )?use|kaise (?:lu|lun|le|lena|lag|use)|कैसे|खुराक|(?:no|don't|do not) (?:show |recommend )?products/i;
 const clean=s=>String(s || '').replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim();
 export function safeProductCard(c, appId = 'siya-ayurveda') {
@@ -44,6 +46,7 @@ export function createChatProductSearch({domain,storefrontToken,fetcher=fetch, a
     if(appId!==configuredApp || !domain || !storefrontToken || privateOrUsage.test(message))return [];
     const text=norm(message),tokens=text.match(/[a-z0-9]{4,}/g)?.filter(t=>!stop.has(t)) || [];
     const concerns=groups.filter(g=>g.some(w=>new RegExp('(?:^|[^a-z])'+w+'(?:$|[^a-z])','u').test(text)));
+    if(!tokens.length && !concerns.length)return [];
     const found=(await load()).map(p=>{
       const title=norm(p.title),haystack=norm([p.title,p.productType,...(p.tags||[])].join(' '));
       const score=concerns.reduce((n,g)=>n+(g.some(w=>haystack.includes(w))?10:0),0)+tokens.filter(t=>title.includes(t)).length;

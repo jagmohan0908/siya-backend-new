@@ -19,6 +19,13 @@ test('unmatched chat and missing catalogue configuration return no fabricated pr
  const {search}=setup();assert.deepEqual(await search('hello there','siya-ayurveda'),[]);
  assert.deepEqual(await createChatProductSearch({})('acne','siya-ayurveda'),[]);
 });
+
+test('support and availability questions do not match generic words in product titles',async()=>{
+ const {search}=setup([{...product,title:'Gut Support',tags:[]},{...product,title:'Fertility Support',tags:[]}]);
+ for(const message of ['Is support available?','Please confirm customer support is available','Hello support team','Seedfit integration test: please confirm support is available. This is a test, no medical advice needed.'])
+  assert.deepEqual(await search(message,'siya-ayurveda'),[]);
+ assert.equal((await search('fertility support products','siya-ayurveda')).length,1);
+});
 test('catalogue errors do not break chat or expose stale prices',async()=>{
  const search=createChatProductSearch({domain:'store.myshopify.com',storefrontToken:'test',fetcher:async()=>{throw Error('offline')}});
  assert.deepEqual(await search('acne','siya-ayurveda'),[]);
