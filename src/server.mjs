@@ -1,14 +1,8 @@
 import {createServer} from 'node:http';
 import {pathToFileURL} from 'node:url';
 import {Erp} from './erp.mjs';
-import {createAuthenticator} from './auth.mjs';
-import {MobileService} from './service.mjs';
-import {createRewardIssuer} from './shopify.mjs';
-import {Razorpay} from './payments.mjs';
-import {AppsScriptMeet} from './appointment-meet.mjs';
-import {createProductCatalog} from './product-images.mjs';
-import {createChatProductSearch} from './chat-products.mjs';
 import {ApiError, requireValue} from './errors.mjs';
+import {createTenants} from './tenants.mjs';
 
 async function readBody(req) {
   requireValue((req.headers['content-type'] || '').startsWith('application/json'), 'Use application/json',415);
@@ -17,7 +11,7 @@ async function readBody(req) {
   try { return JSON.parse(Buffer.concat(chunks).toString()); } catch { throw new ApiError(400,'invalid_json','Invalid JSON'); }
 }
 
-export function createApi({service, authenticate, origins = [], allowBookings = false}) {
+export function createApi({service: defaultService, authenticate: defaultAuthenticate, tenants, origins = [], allowBookings: defaultBookings = false}) {
   const limits = new Map();
   const server = createServer(async (req,res) => {
     res.setHeader('Cache-Control','no-store'); res.setHeader('X-Content-Type-Options','nosniff');
@@ -37,6 +31,11 @@ export function createApi({service, authenticate, origins = [], allowBookings = 
       requireValue(++bucket.count <= 120,'Too many requests. Please try again shortly.',429);
       const url = new URL(req.url,'http://localhost');
       const appId = url.searchParams.get('app') ?? 'siya-ayurveda';
+      requireValue(['siya-ayurveda','seedfit'].includes(appId),'Unknown app ID',400,'invalid_app');
+      const tenant = url.pathname === '/health' ? null : tenants?.(appId);
+      const service = tenant?.service ?? defaultService;
+      const authenticate = tenant?.authenticate ?? defaultAuthenticate;
+      const allowBookings = tenant?.allowBookings ?? defaultBookings;
       const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
       let result;
       if (req.method === 'GET' && url.pathname === '/health') result = {ok:true,version:1};
@@ -116,16 +115,7 @@ export function createApi({service, authenticate, origins = [], allowBookings = 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   requireValue(process.env.ERP_URL?.startsWith('https://') && process.env.ERP_TOKEN,'Configure ERP_URL and ERP_TOKEN');
   const erp = new Erp({url:process.env.ERP_URL,token:process.env.ERP_TOKEN});
-  const productCatalog=createProductCatalog({domain:process.env.SHOPIFY_DOMAIN,storefrontToken:process.env.SHOPIFY_STOREFRONT_TOKEN});
-  const service = new MobileService({erp,webhookUrl:process.env.APPOINTMENT_WEBHOOK_URL,
-    chatProducts:createChatProductSearch({domain:process.env.SHOPIFY_DOMAIN,storefrontToken:process.env.SHOPIFY_STOREFRONT_TOKEN}),
-    s3PresignMethod:process.env.S3_PRESIGN_METHOD,
-    productCatalog,productImage:async item=>(await productCatalog(item)).imageUrl,
-    payments:new Razorpay({keyId:process.env.RAZORPAY_KEY_ID,keySecret:process.env.RAZORPAY_KEY_SECRET}),
-    meetings:new AppsScriptMeet({url:process.env.GOOGLE_MEET_SCRIPT_URL}),
-    webhookSecret:process.env.APPOINTMENT_WEBHOOK_SECRET,rewardIssuer:createRewardIssuer({domain:process.env.SHOPIFY_DOMAIN,adminToken:process.env.SHOPIFY_ADMIN_TOKEN})});
-  const server = createApi({service,authenticate:createAuthenticator({domain:process.env.SHOPIFY_DOMAIN,storefrontToken:process.env.SHOPIFY_STOREFRONT_TOKEN}),
-    allowBookings:process.env.BOOKINGS_ENABLED === 'true',
+  const server = createApi({tenants:createTenants({erp}),
     origins:(process.env.CORS_ORIGINS || '').split(',').filter(Boolean)});
-  server.listen(Number(process.env.PORT || 8787),process.env.HOST || '127.0.0.1',() => console.log('Siya mobile API listening'));
+  server.listen(Number(process.env.PORT || 8787),process.env.HOST || '127.0.0.1',() => console.log('Shared mobile API listening'));
 }

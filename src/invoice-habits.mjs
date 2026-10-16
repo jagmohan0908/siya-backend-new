@@ -51,7 +51,7 @@ async function invoiceItems(service,doc) {
 
 async function summary(service,doc) {
   return {id:doc.name,date:doc.posting_date,paymentStatus:doc.status || '',
-    kit:await invoiceKit(service.erp,doc,service.productImage),
+    kit:await invoiceKit(service.erp,doc,service.productImage,service.appId === 'seedfit' ? service.productCatalog : undefined),
     items:await invoiceItems(service,doc)};
 }
 

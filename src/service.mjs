@@ -33,23 +33,36 @@ const doctorTag = appId => {
 };
 
 export class MobileService {
-  constructor({erp, webhookUrl, webhookSecret, fetcher = fetch, rewardIssuer, payments, meetings, productImage = async () => '', productCatalog, chatProducts,
+  constructor({erp, webhookUrl, webhookSecret, fetcher = fetch, rewardIssuer, payments, meetings, productImage = async () => '', productCatalog, chatProducts, appId = 'siya-ayurveda',
     s3PresignMethod = 'sriaas_clinic.api.s3.presign.get_presigned_url'}) {
     Object.assign(this, {erp, webhookUrl, webhookSecret, fetcher, rewardIssuer, payments, meetings, productImage, productCatalog, chatProducts, s3PresignMethod});
-    this.records = new Records(erp); this.queue = new SerialQueue();
+    this.appId = appId;
+    this.records = new Records(erp, appId === 'siya-ayurveda' ? '' : appId); this.queue = new SerialQueue();
     this.assessments = new Assessments(erp);
     this.support = new SupportTickets(this);
     this.aiChat = new AiChat(this);
   }
   async identity(user) {
     let record = await this.records.read(user.id, 'identity', 'self');
-    if (record) return record.data;
+    if (record) {
+      if (this.appId === 'seedfit') {
+        // Clinic linking/unlinking must take effect without clearing backend records.
+        const parent = await this.erp.get('Mobile App User',record.data.erpUser);
+        requireValue(parent.external_id === `${this.appId}:${user.id}`,
+          'Your account needs to be linked by the clinic',409,'identity_link_required');
+        const patients = [...new Set((parent.profiles || []).map(p=>p.patient_id).filter(Boolean))];
+        return {erpUser:parent.name,patient:patients.length === 1 ? patients[0] : null};
+      }
+      return record.data;
+    }
     // Only stable, verified external IDs may attach an existing ERP account.
-    const ids = [user.id, user.id.split('/').at(-1)];
+    // Keep existing Siya identities unchanged. Other stores have their own ERP identity.
+    const externalId = this.appId === 'siya-ayurveda' ? user.id : `${this.appId}:${user.id}`;
+    const ids = this.appId === 'siya-ayurveda' ? [user.id, user.id.split('/').at(-1)] : [externalId];
     let matches = await this.erp.list('Mobile App User', {external_id: ['in', ids]}, ['name'], {limit: 2});
     requireValue(matches.length < 2, 'Your account needs to be linked by the clinic', 409, 'identity_link_required');
     const parent = matches.length ? await this.erp.get('Mobile App User', matches[0].name) :
-      await this.erp.create('Mobile App User', {external_id: user.id, full_name: user.name, phone: user.phone, is_active: 1});
+      await this.erp.create('Mobile App User', {external_id: externalId, full_name: user.name, phone: user.phone, is_active: 1});
     const patients = [...new Set((parent.profiles || []).map(p => p.patient_id).filter(Boolean))];
     const data = {erpUser: parent.name, patient: patients.length === 1 ? patients[0] : null};
     await this.records.write(user.id, 'identity', 'self', data, 0);
@@ -113,7 +126,8 @@ export class MobileService {
       about:doc.custom_about_doctor || '', isAvailable:opd || online,
       acceptsOpdAppointments:opd, acceptsOnlineAppointments:online,
       availableDays:[...new Set((row.schedules || []).flatMap(s=>s.days))].map(v=>v.slice(0,3)),
-      nextAvailableSlot:'', expertise:(doc.sr_diseases || []).map(d=>d.disease).filter(Boolean),
+      nextAvailableSlot:'', expertise:(doc.sr_diseases || []).map(d=>d.disease).filter(d=>d && ![...appDoctorTags.values()].includes(d)),
+      tags:(doc.sr_diseases || []).map(d=>d.disease?.toLowerCase()).filter(d=>['male','female'].includes(d)),
       availableConsultationType:opd ? (online ? 'all' : 'opd') : (online ? 'online' : 'none')};
   }
   async doctors(appId = 'siya-ayurveda') {
@@ -157,7 +171,7 @@ export class MobileService {
     for (const gender of ['man','woman']) {
       const id=assets.data[gender];if (!id) continue;
       const file=await this.erp.get('File',id);
-      requireValue(file.attached_to_doctype==='Siya Mobile Record' && file.attached_to_name===recordName('system','review_assets','indian-illustrations')
+      requireValue(file.attached_to_doctype==='Siya Mobile Record' && file.attached_to_name===this.records.key('system','review_assets','indian-illustrations')
         && !file.is_private,'Review image not available',404);
       const signed=await this.erp.method(this.s3PresignMethod,{file_url:file.file_url,expires:900});
       const url=typeof signed==='string'?signed:signed?.url;
@@ -206,7 +220,7 @@ export class MobileService {
     requireValue(fee === 0 || prepare, 'Prepare your appointment payment first',409);
     const date = text(body.appointmentDate).slice(0,10);
     const time = text(body.time, 8);
-    const reservationName = `SIYA-${recordName(user.id, 'appointment', id).slice(0,32)}`;
+    const reservationName = `${this.appId === 'seedfit' ? 'SEEDFIT' : 'SIYA'}-${this.records.key(user.id, 'appointment', id).slice(0,32)}`;
     let reservation = await this.erp.maybe('Mobile App Appointment', reservationName);
     const slots = await this.availability(doctor, date, reservation ? id : undefined, appId);
     const slot = slots.slots.find(s => s.time === time);
@@ -226,7 +240,7 @@ export class MobileService {
       practitioner_id: doctor, practitioner_schedule: slot.schedule_id, appointment_date: date, appointment_time: time,
       duration: slot.duration, status: 'Pending', consultation_type: mode, is_online: mode === 'opd' ? 0 : 1, patient_name: patientName,
       mobile_number: patientPhone, email: user.email,
-      payload_json: JSON.stringify({source: 'siya-mobile-api', appId, id, patientGender, department: appointmentDepartment}),
+      payload_json: JSON.stringify({source: 'mobile-api', appId, id, patientGender, department: appointmentDepartment}),
     });
     const saved = {id, appId, doctorId: doctor, doctorName: profile.name,
       doctorImage: profile.imageUrl, specialization: profile.specialization, appointmentDate: date, time,
@@ -539,7 +553,7 @@ export class MobileService {
         const shipment = row.type === 'Sales Invoice' ? await this.invoiceShipment(doc,{optional:true}) : null;
         return orderDetails({...doc,doctype:row.type},patient,this.productImage,
           row.type === 'Sales Invoice' ? trackingSummary(doc,shipment) : null,
-          await invoiceKit(this.erp,doc,this.productImage));
+          await invoiceKit(this.erp,doc,this.productImage,this.appId === 'seedfit' ? this.productCatalog : undefined));
       })));
     }
     return {items:items.sort((a,b)=>String(b.date).localeCompare(String(a.date))),
@@ -580,7 +594,7 @@ export class MobileService {
     const {invoice,patient} = await this.ownedInvoice(user,id);
     if (pdf) return this.erp.request(`/api/method/frappe.utils.print_format.download_pdf?${new URLSearchParams({doctype:'Sales Invoice',name:id,format:'Standard',no_letterhead:'0'})}`, {raw:true});
     return orderDetails({...invoice,doctype:'Sales Invoice'},patient,this.productImage,
-      trackingSummary(invoice,await this.invoiceShipment(invoice,{optional:true})),await invoiceKit(this.erp,invoice,this.productImage));
+      trackingSummary(invoice,await this.invoiceShipment(invoice,{optional:true})),await invoiceKit(this.erp,invoice,this.productImage,this.appId === 'seedfit' ? this.productCatalog : undefined));
   }
   async refreshInvoiceTracking(user, id) {
     // Authorize before querying tracking or triggering a carrier refresh.
@@ -692,7 +706,7 @@ export class MobileService {
       const cycle = `${cursor.toISOString().slice(0,10)}-${Math.floor(streak/30)}`;
       const key = recordName(user.id,'reward',cycle);
       let reward = await this.records.read(user.id,'reward',key);
-      if (!reward) reward = await this.records.write(user.id,'reward',key,{id:key,code:`SIYA${key.slice(0,16).toUpperCase()}`,state:'pending',
+      if (!reward) reward = await this.records.write(user.id,'reward',key,{id:key,code:`${this.appId === 'seedfit' ? 'SEEDFIT' : 'SIYA'}${key.slice(0,16).toUpperCase()}`,state:'pending',
         createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+90*86400000).toISOString()},0);
       if (reward.data.state !== 'issued') {
         try { await this.rewardIssuer(user,reward.data); }

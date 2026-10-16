@@ -648,3 +648,23 @@ profile/treatment-image flow; appointment webhook credentials/payment test keys
 and Shopify discount credentials in the backend. Paid booking, discount creation,
 device login, and private AI patient answers were not verified live. The
 read-only check writes a private JSON validation report next to the export.
+
+## Shared Seedfit deployment
+
+The server now selects independent services with `app=siya-ayurveda` or `app=seedfit`.
+Keep existing unprefixed settings for Siya. Seedfit uses the `SEEDFIT_` variables
+listed in `.env.example` for Shopify, payments, appointment webhook, Google Meet
+and the booking enable switch. No Seedfit setting falls back to Siya credentials.
+Both services use the existing ERP connection. Configure the Seedfit values on
+this same Render service before deploying the updated Seedfit client.
+
+Seedfit Mobile App User external IDs and generic record accounts have a
+`seedfit:` prefix. Existing Siya IDs are unchanged. Clinic staff explicitly link
+the patient; Seedfit never infers clinical access by matching a telephone number.
+The backend rereads Seedfit profile links so revocation/linking takes effect.
+Seedfit product-card hosts and kit reorder IDs are resolved against its own store.
+
+The local recovered Seedfit payment credentials are test mode. Bookings default
+to disabled until the existing Seedfit workflow and server configuration are
+verified. No deployment or release is implied by this source change. See the
+Seedfit repository's `docs/ERP_INTEGRATION.md` for the app flow and rollout checks.

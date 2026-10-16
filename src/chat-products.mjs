@@ -4,17 +4,18 @@ const groups=[['acne','pimple','pimples','मुंहासे'],['hair','dandr
 const stop=new Set('siya ayurveda product products treatment kit for with and the cream oil tablets shampoo buy price show tell please recommend want need hai mujhe chahiye best'.split(' '));
 const privateOrUsage=/\b(order|orders|invoice|tracking|shipment|awb|delivery|prescription|dose|dosage|take|usage|apply|safe|pregnan\w*|breastfeed\w*|child|children|baby|reaction|irritation|swelling|burning|side effects?|allerg\w*|kitni|kitna|lagana|refund|cancel|return)\b|how (?:do i |to )?use|kaise (?:lu|lun|le|lena|lag|use)|कैसे|खुराक|(?:no|don't|do not) (?:show |recommend )?products/i;
 const clean=s=>String(s || '').replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim();
-export function safeProductCard(c) {
+export function safeProductCard(c, appId = 'siya-ayurveda') {
   if(c?.type!=='product' || !/^gid:\/\/shopify\/Product\/\d+$/.test(c.product_id || ''))return null;
   let url,image;
   try{url=new URL(c.url);image=c.image_url?new URL(c.image_url):null}catch{return null}
-  if(url.protocol!=='https:' || !['siyaayurveda.com','www.siyaayurveda.com'].includes(url.hostname) || url.username || url.password || url.port || !/^\/products\/[a-z0-9-]+$/.test(url.pathname))return null;
+  const hosts = appId === 'seedfit' ? ['seed.fit','www.seed.fit'] : appId === 'siya-ayurveda' ? ['siyaayurveda.com','www.siyaayurveda.com'] : [];
+  if(url.protocol!=='https:' || !hosts.includes(url.hostname) || url.username || url.password || url.port || !/^\/products\/[a-z0-9-]+$/.test(url.pathname))return null;
   const price=String(c.price??'');if(!/^\d+(?:\.\d+)?$/.test(price) || !/^[A-Z]{3}$/.test(c.currency || ''))return null;
   return {type:'product',product_id:c.product_id,title:clean(c.title).slice(0,200),description:clean(c.description).slice(0,240),
     image_url:image?.protocol==='https:' && image.hostname==='cdn.shopify.com' && !image.username && !image.password && !image.port?image.href:'',
     price,currency:c.currency,available:c.available===true,url:url.href};
 }
-export function createChatProductSearch({domain,storefrontToken,fetcher=fetch}) {
+export function createChatProductSearch({domain,storefrontToken,fetcher=fetch, appId: configuredApp = 'siya-ayurveda'}) {
   let products=[],expires=0,pending;
   async function load() {
     if(Date.now()<expires)return products;
@@ -40,7 +41,7 @@ export function createChatProductSearch({domain,storefrontToken,fetcher=fetch}) 
   }
   return async(message,appId)=>{
     // Seedfit must have its own catalogue integration; never borrow Siya's store.
-    if(appId!=='siya-ayurveda' || !domain || !storefrontToken || privateOrUsage.test(message))return [];
+    if(appId!==configuredApp || !domain || !storefrontToken || privateOrUsage.test(message))return [];
     const text=norm(message),tokens=text.match(/[a-z0-9]{4,}/g)?.filter(t=>!stop.has(t)) || [];
     const concerns=groups.filter(g=>g.some(w=>new RegExp('(?:^|[^a-z])'+w+'(?:$|[^a-z])','u').test(text)));
     const found=(await load()).map(p=>{
@@ -49,7 +50,7 @@ export function createChatProductSearch({domain,storefrontToken,fetcher=fetch}) 
       return {p,score};
     }).filter(x=>x.score>0).sort((a,b)=>b.score-a.score || a.p.title.localeCompare(b.p.title));
     return found.slice(0,3).map(({p})=>safeProductCard({type:'product',product_id:p.id,title:p.title,description:p.description,
-      image_url:p.featuredImage?.url || '',url:`https://siyaayurveda.com/products/${p.handle}`,
-      price:p.priceRange?.minVariantPrice?.amount,currency:p.priceRange?.minVariantPrice?.currencyCode,available:p.availableForSale})).filter(Boolean);
+      image_url:p.featuredImage?.url || '',url:`https://${appId === 'seedfit' ? 'seed.fit' : 'siyaayurveda.com'}/products/${p.handle}`,
+      price:p.priceRange?.minVariantPrice?.amount,currency:p.priceRange?.minVariantPrice?.currencyCode,available:p.availableForSale},appId)).filter(Boolean);
   };
 }

@@ -88,7 +88,7 @@ export class AiChat {
       if(String(inbound.conversation)!==String(convo.name) || inbound.direction!=='Inbound' || inbound.sender_type!=='Customer' || inbound.provider_name!=='Mobile App')return [];
       const data=json(inbound.raw_transport_payload);
       if(data.source!=='siya_backend_catalog_v1' || channels[data.appId]!==convo.channel_account || !Array.isArray(data.cards))return [];
-      return data.cards.slice(0,3).map(safeProductCard).filter(Boolean);
+      return data.cards.slice(0,3).map(card=>safeProductCard(card,data.appId)).filter(Boolean);
     } catch { return []; } // Missing catalogue metadata must not hide the ERP reply.
   }
   async payload(convo,after) {

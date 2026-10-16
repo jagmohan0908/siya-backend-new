@@ -3,23 +3,27 @@ import {requireValue} from './errors.mjs';
 
 export const recordName = (account, kind, key) => createHash('sha256').update(JSON.stringify([account, kind, key])).digest('hex');
 export class Records {
-  constructor(erp) { this.erp = erp; }
+  constructor(erp, namespace = '') { this.erp = erp; this.namespace = namespace; }
+  account(account) { return this.namespace ? `${this.namespace}:${account}` : account; }
+  key(account, kind, key) { return recordName(this.account(account), kind, key); }
   async read(account, kind, key) {
+    account = this.account(account);
     const doc = await this.erp.maybe('Siya Mobile Record', recordName(account, kind, key));
     if (!doc) return null;
     requireValue(doc.account === account && doc.kind === kind, 'Record not found', 404);
     return {data: JSON.parse(doc.payload || '{}'), revision: Number(doc.revision || 0), modified: doc.modified};
   }
   async write(account, kind, key, data, revision) {
-    const name = recordName(account, kind, key);
+    const name = this.key(account, kind, key);
     const old = await this.read(account, kind, key);
     requireValue(revision === (old?.revision || 0), 'This record changed on another device. Refresh and try again.', 409, 'revision_conflict');
-    const fields = {record_key: name, account, kind, payload: JSON.stringify(data), revision: revision + 1};
+    const fields = {record_key: name, account: this.account(account), kind, payload: JSON.stringify(data), revision: revision + 1};
     if (old) await this.erp.update('Siya Mobile Record', name, {...fields, modified: old.modified});
     else await this.erp.create('Siya Mobile Record', fields);
     return {data, revision: revision + 1};
   }
   async list(account, kind, offset = 0) {
+    account = this.account(account);
     const rows = await this.erp.list('Siya Mobile Record', {account, kind}, ['name', 'payload', 'revision'], {offset, limit: 50});
     return rows.map(row => ({data: JSON.parse(row.payload), revision: row.revision}));
   }

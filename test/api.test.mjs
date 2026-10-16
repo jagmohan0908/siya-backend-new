@@ -700,7 +700,7 @@ test('ERP controls practitioner details, diseases, charges and online eligibilit
     custom_about_doctor:'Updated biography',custom_accept_online_appointments:0,image:'/files/doctor.jpg',modified:'v1'});
   let doctor=(await service.doctors()).doctors[0];
   assert.equal(doctor.name,'Updated ERP name');assert.equal(doctor.qualification,'BHMS');
-  assert.deepEqual(doctor.expertise,['Skin Allergy','Fatty Liver Disease','Siya Ayurveda']);
+  assert.deepEqual(doctor.expertise,['Skin Allergy','Fatty Liver Disease']);
   assert.equal(doctor.about,'Updated biography');assert.equal(doctor.consultationFee,1000.5);
   assert.equal(doctor.isFreeConsultation,false);assert.equal(doctor.availableConsultationType,'opd');
   assert.deepEqual(doctor.availableDays,['Mon','Sat']);assert.match(doctor.imageUrl,/photo\?app=siya-ayurveda&v=v1$/);
