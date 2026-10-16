@@ -26,14 +26,16 @@ const messageDto=d=>({id:d.name,ticket_id:d.ticket,sender_type:d.sender_type==='
 
 export class SupportTickets {
   constructor(service) { this.service=service;this.erp=service.erp; }
+  ownerId(user,appId) { return appId==='seedfit'?`seedfit:${user.id}`:user.id; }
+  ownerFilter(user,appId) { return appId==='seedfit'?['in',[this.ownerId(user,appId),user.id]]:user.id; }
   async owned(user,appId,id) {
     const app=assessmentApp(appId);
     const doc=await this.erp.get('Support Ticket',id);
-    requireValue(doc.user_id===user.id && doc.custom_mobile_app===app,'Ticket not found',404);
+    requireValue([user.id,this.ownerId(user,appId)].includes(doc.user_id) && doc.custom_mobile_app===app,'Ticket not found',404);
     return doc;
   }
   async list(user,appId,query={}) {
-    const filters={user_id:user.id,custom_mobile_app:assessmentApp(appId)};
+    const filters={user_id:this.ownerFilter(user,appId),custom_mobile_app:assessmentApp(appId)};
     if(query.status) { requireValue(statuses[query.status],'Invalid status');filters.status=statuses[query.status]; }
     const options=paging(query);
     const rows=await this.erp.list('Support Ticket',filters,['name'],{...options,order:'creation desc, name desc'});
@@ -50,7 +52,8 @@ export class SupportTickets {
     const parent=await this.erp.get('Mobile App User',identity.erpUser);
     const name=text(body.user_name || parent.full_name || parent.first_name || 'App user',140);
     const email=text(body.user_email || parent.email || '',140),phone=text(body.user_phone || parent.phone || '',40);
-    const doc=await this.erp.create('Support Ticket',{naming_series:'ST-.YYYY.-',user_id:user.id,
+    // Match the namespaced Mobile App User identity used by the Frappe inbox.
+    const doc=await this.erp.create('Support Ticket',{naming_series:'ST-.YYYY.-',user_id:this.ownerId(user,appId),
       custom_mobile_app:app,custom_mobile_app_user:identity.erpUser,
       customer_name:name,user_name:name,email,user_email:email,phone,user_phone:phone,
       subject,description:escape(description),status:'Open',priority,category:text(body.category || 'General',100)});

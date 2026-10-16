@@ -144,7 +144,7 @@ export class AiChat {
       return {data:{conversation_id:id,message_id:String(saved.name),duplicate}};
     }
     const subject=`Care-team request: ${id}`;
-    const existing=await this.erp.list('Support Ticket',{user_id:user.id,custom_mobile_app:assessmentApp(appId),subject,category:'AI Chat Care Team',status:['not in',['Resolved','Closed']]},['name','ticket_number'],{limit:1});
+    const existing=await this.erp.list('Support Ticket',{user_id:this.service.support.ownerFilter(user,appId),custom_mobile_app:assessmentApp(appId),subject,category:'AI Chat Care Team',status:['not in',['Resolved','Closed']]},['name','ticket_number'],{limit:1});
     if(existing.length)return {data:{ticket:existing[0].name,ticket_number:existing[0].ticket_number || existing[0].name,created:false}};
     const messages=await this.messages(convo);
     const result=await this.service.support.create(user,appId,{subject,category:'AI Chat Care Team',
