@@ -456,7 +456,7 @@ test('invoice reads reject other patients and draft invoices',async () => {
   const {service,erp}=setup();await service.identity(user);
   const identity=await service.records.read(user.id,'identity','self');
   const patient=await erp.create('Patient',{});
-  await service.records.write(user.id,'identity','self',{...identity.data,patient:patient.name},identity.revision);
+  await erp.update('Mobile App User',identity.data.erpUser,{profiles:[{patient_id:patient.name}]});
   const other=await erp.create('Sales Invoice',{patient:'another-patient',docstatus:1,items:[]});
   const draft=await erp.create('Sales Invoice',{patient:patient.name,docstatus:0,items:[]});
   await assert.rejects(service.invoice(user,other.name),{status:404});
@@ -467,7 +467,7 @@ test('orders work without optional shipping columns and never expose raw invoice
     const {service,erp}=setup();await service.identity(user);
     const identity=await service.records.read(user.id,'identity','self');
     const patient=await erp.create('Patient',{});
-    await service.records.write(user.id,'identity','self',{...identity.data,patient:patient.name},identity.revision);
+    await erp.update('Mobile App User',identity.data.erpUser,{profiles:[{patient_id:patient.name}]});
     const invoice=await erp.create('Sales Invoice',{patient:patient.name,docstatus:1,grand_total:1499,currency:'INR',
       status:'Unpaid',remarks:'Private clinical notes',contact_email:'private@example.invalid',...shipping});
     await erp.create('Sales Invoice',{patient:'another-patient',docstatus:1});
@@ -490,7 +490,7 @@ test('shipment refresh checks ownership, updates events and isolates carrier fai
   const {service,erp}=setup();await service.identity(user);
   const identity=await service.records.read(user.id,'identity','self');
   const patient=await erp.create('Patient',{});
-  await service.records.write(user.id,'identity','self',{...identity.data,patient:patient.name},identity.revision);
+  await erp.update('Mobile App User',identity.data.erpUser,{profiles:[{patient_id:patient.name}]});
   const invoice=await erp.create('Sales Invoice',{patient:patient.name,customer:'customer',docstatus:1,items:[]});
   const other=await erp.create('Sales Invoice',{patient:'other',docstatus:1,items:[]});
   erp.docs.set('DocType/Shipment Tracking Shipment',{name:'Shipment Tracking Shipment'});
@@ -525,7 +525,7 @@ test('shipment permission denial preserves owned orders and reports refresh unav
     const {service,erp}=setup();await service.identity(user);
     const identity=await service.records.read(user.id,'identity','self');
     const patient=await erp.create('Patient',{});
-    await service.records.write(user.id,'identity','self',{...identity.data,patient:patient.name},identity.revision);
+    await erp.update('Mobile App User',identity.data.erpUser,{profiles:[{patient_id:patient.name}]});
     const invoice=await erp.create('Sales Invoice',{patient:patient.name,docstatus:1,grand_total:1499,items:[],si_shipkia_awb_number:'SAVED-AWB'});
     const other=await erp.create('Sales Invoice',{patient:'other',docstatus:1,items:[]});
     erp.docs.set('DocType/Shipment Tracking Shipment',{name:'Shipment Tracking Shipment'});
@@ -558,7 +558,7 @@ test('an invoice without a shipment never triggers a carrier request',async()=>{
   const {service,erp}=setup();await service.identity(user);
   const identity=await service.records.read(user.id,'identity','self');
   const patient=await erp.create('Patient',{});
-  await service.records.write(user.id,'identity','self',{...identity.data,patient:patient.name},identity.revision);
+  await erp.update('Mobile App User',identity.data.erpUser,{profiles:[{patient_id:patient.name}]});
   const invoice=await erp.create('Sales Invoice',{patient:patient.name,docstatus:1,items:[]});
   erp.method=async()=>{throw Error('Must not call a tracking integration');};
   assert.deepEqual(await service.refreshInvoiceTracking(user,invoice.name),{tracking:null,refreshState:'not_available'});

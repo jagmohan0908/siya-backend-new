@@ -43,22 +43,25 @@ export class MobileService {
     this.aiChat = new AiChat(this);
   }
   async identity(user) {
+    const externalId = this.appId === 'siya-ayurveda' ? user.id : `${this.appId}:${user.id}`;
+    const ids = this.appId === 'siya-ayurveda' ? [user.id, user.id.split('/').at(-1)] : [externalId];
     let record = await this.records.read(user.id, 'identity', 'self');
     if (record) {
-      if (this.appId === 'seedfit') {
-        // Clinic linking/unlinking must take effect without clearing backend records.
-        const parent = await this.erp.get('Mobile App User',record.data.erpUser);
-        requireValue(parent.external_id === `${this.appId}:${user.id}`,
-          'Your account needs to be linked by the clinic',409,'identity_link_required');
-        const patients = [...new Set((parent.profiles || []).map(p=>p.patient_id).filter(Boolean))];
-        return {erpUser:parent.name,patient:patients.length === 1 ? patients[0] : null};
-      }
-      return record.data;
+      // The cached record locates the account; current ERP profiles authorize
+      // patient access on every platform, including later linking/unlinking.
+      const parent = await this.erp.get('Mobile App User',record.data.erpUser);
+      requireValue(ids.includes(parent.external_id),
+        'Your account needs to be linked by the clinic',409,'identity_link_required');
+      const patients = [...new Set((parent.profiles || []).map(p=>p.patient_id).filter(Boolean))];
+      const patient = patients.length === 1 ? patients[0] : null;
+      // Preserve separately reviewed billing access only while its patient link
+      // is still current; changing the profile must not inherit that grant.
+      return {erpUser:parent.name,patient,
+        ...(this.appId === 'siya-ayurveda' && patient && record.data.patient === patient && Array.isArray(record.data.customers)
+          ? {customers:record.data.customers} : {})};
     }
     // Only stable, verified external IDs may attach an existing ERP account.
     // Keep existing Siya identities unchanged. Other stores have their own ERP identity.
-    const externalId = this.appId === 'siya-ayurveda' ? user.id : `${this.appId}:${user.id}`;
-    const ids = this.appId === 'siya-ayurveda' ? [user.id, user.id.split('/').at(-1)] : [externalId];
     let matches = await this.erp.list('Mobile App User', {external_id: ['in', ids]}, ['name'], {limit: 2});
     requireValue(matches.length < 2, 'Your account needs to be linked by the clinic', 409, 'identity_link_required');
     const parent = matches.length ? await this.erp.get('Mobile App User', matches[0].name) :
@@ -408,7 +411,18 @@ export class MobileService {
   async appointments(user) {
     const rows = await this.records.list(user.id, 'appointment');
     const items = [];
-    for (const row of rows) items.push(await this.refreshAppointment(user, row));
+    for (const row of rows) {
+      try { items.push(await this.refreshAppointment(user, row)); }
+      catch (error) {
+        // A stale booking reference must not hide the customer's other bookings.
+        // Only a confirmed missing Frappe document qualifies, not an ERP outage
+        // or a proxy's generic 404. Never expose an unverified old meeting link.
+        if (!(error instanceof ApiError) || !error.missingDocument) throw error;
+        items.push({...row.data,status:'pending',bookingSyncPending:true,
+          encounterSyncPending:true,meetingLink:null,meetingState:'needs_review',
+          syncIssue:'erp_record_missing'});
+      }
+    }
     return {items};
   }
   async appointmentChange(user, id, body) {

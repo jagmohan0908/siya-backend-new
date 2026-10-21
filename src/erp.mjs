@@ -21,6 +21,7 @@ export class Erp {
       const failure = new ApiError(status, 'erp_request_failed', response.status === 413 ? 'Image is too large. Please choose a smaller image.' : `ERP could not complete the request (${response.status})`);
       // Internal classification only; never retain the ERP response or credentials.
       failure.upstreamStatus = response.status;
+      failure.missingDocument = response.status === 404 && error.exc_type === 'DoesNotExistError';
       throw failure;
     }
     if (raw) return response;
