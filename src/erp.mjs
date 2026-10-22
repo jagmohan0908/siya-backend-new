@@ -1,4 +1,5 @@
 import {ApiError} from './errors.mjs';
+import {erpFailureDetails, erpTransportDetails} from './diagnostics.mjs';
 
 export class Erp {
   constructor({url, token, fetcher = fetch}) {
@@ -6,21 +7,30 @@ export class Erp {
     this.isNgrok = new URL(this.url).hostname.endsWith('.ngrok-free.dev');
   }
   async request(path, {method = 'GET', body, raw = false, timeoutMs = 25000} = {}) {
-    const response = await this.fetcher(`${this.url}${path}`, {
+    let response;
+    try { response = await this.fetcher(`${this.url}${path}`, {
       method, headers: {Authorization: `token ${this.token}`, ...(this.isNgrok ? {'ngrok-skip-browser-warning':'1'} : {}), ...(body instanceof FormData ? {} : {'Content-Type': 'application/json'})},
       body: body == null ? undefined : body instanceof FormData ? body : JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs), redirect: 'error',
     });
+    } catch (failure) {
+      if (failure && typeof failure === 'object') failure.erpDiagnostic = erpTransportDetails(path, method, failure);
+      throw failure;
+    }
     if (!response.ok) {
       // Never relay ERP stack traces, request bodies or credentials to the app.
-      const error = await response.json().catch(() => ({}));
+      const error = await response.json().catch(() => ({})) || {};
+      const diagnostic = erpFailureDetails(path, method, response.status, error.exc_type);
       if (error.exc_type === 'TimestampMismatchError' || error.exc_type === 'DuplicateEntryError') {
-        throw new ApiError(409,'revision_conflict','This record changed. Refresh and try again.');
+        const failure = new ApiError(409,'revision_conflict','This record changed. Refresh and try again.');
+        failure.erpDiagnostic = diagnostic;
+        throw failure;
       }
       const status = response.status === 404 ? 404 : response.status === 409 ? 409 : response.status === 413 ? 413 : 502;
       const failure = new ApiError(status, 'erp_request_failed', response.status === 413 ? 'Image is too large. Please choose a smaller image.' : `ERP could not complete the request (${response.status})`);
       // Internal classification only; never retain the ERP response or credentials.
       failure.upstreamStatus = response.status;
+      failure.erpDiagnostic = diagnostic;
       failure.missingDocument = response.status === 404 && error.exc_type === 'DoesNotExistError';
       throw failure;
     }
