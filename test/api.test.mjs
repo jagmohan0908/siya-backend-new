@@ -622,12 +622,12 @@ test('an ERP avatar cannot expose an attachment owned by another account', async
   assert.equal(profile.data.imageFileId,null);assert.equal(profile.data.imageSyncPending,true);
 });
 
-async function fakeUpload(service,erp,{storage='s3://bucket/upload.jpg',duringUpload}={}) {
+async function fakeUpload(service,erp,{storage='s3://bucket/upload.jpg',duringUpload,expectedPrivacy='0'}={}) {
   const identity=await service.identity(user);
   erp.request=async (_,request)=>{
     assert.equal(request.body.get('docname'),identity.erpUser);
-    assert.equal(request.body.get('is_private'),'1');
-    const file=await erp.create('File',{attached_to_doctype:'Mobile App User',attached_to_name:identity.erpUser,file_url:storage});
+    assert.equal(request.body.get('is_private'),expectedPrivacy);
+    const file=await erp.create('File',{attached_to_doctype:'Mobile App User',attached_to_name:identity.erpUser,file_url:storage,is_private:Number(request.body.get('is_private'))});
     await duringUpload?.();
     return {name:file.name,file_url:'/stale-upload-response.jpg'};
   };
@@ -645,16 +645,16 @@ test('app photo uploads update the ERP Desk image from the saved S3 File',async(
 });
 
 test('treatment attachments do not replace the profile photo',async()=>{
-  const {service,erp}=setup();const identity=await fakeUpload(service,erp);
+  const {service,erp}=setup();const identity=await fakeUpload(service,erp,{expectedPrivacy:'1'});
   await erp.update('Mobile App User',identity.erpUser,{image:'s3://bucket/original.jpg'});
   await service.upload(user,{...photo,purpose:'treatment'});
   assert.equal((await erp.get('Mobile App User',identity.erpUser)).image,'s3://bucket/original.jpg');
 });
 
-test('failed S3 migration preserves the current ERP photo',async()=>{
+test('unsupported profile storage preserves the current ERP photo',async()=>{
   const {service,erp}=setup();const identity=await fakeUpload(service,erp,{storage:'/private/files/pending.jpg'});
   await erp.update('Mobile App User',identity.erpUser,{image:'s3://bucket/original.jpg'});
-  await assert.rejects(service.upload(user,photo),{code:'s3_required'});
+  await assert.rejects(service.upload(user,photo),{code:'image_storage_unavailable'});
   assert.equal((await erp.get('Mobile App User',identity.erpUser)).image,'s3://bucket/original.jpg');
 });
 
@@ -1004,4 +1004,35 @@ test('doctor photos serve only the selected practitioner attachment and reject n
   await assert.rejects(service.doctorPhoto('Megha'),{status:404});
   await erp.update('Healthcare Practitioner','Megha',{image:''});
   await assert.rejects(service.doctorPhoto('Megha'),{status:404});
+});
+
+test('public ERP profile upload is visible in profile and file responses',async()=>{
+  const {service,erp}=setup();const identity=await fakeUpload(service,erp,{storage:'/files/avatar.jpg'});
+  const uploaded=await service.upload(user,photo);
+  assert.equal((await erp.get('Mobile App User',identity.erpUser)).image,'/files/avatar.jpg');
+  assert.equal((await service.profile(user)).data.imageFileId,uploaded.fileId);
+  assert.deepEqual(await service.file(user,uploaded.fileId),{url:new URL('/files/avatar.jpg',erp.url).href,expiresIn:300});
+});
+
+test('public download still requires ownership and rejects unsafe or private paths',async()=>{
+  const {service,erp}=setup();const identity=await service.identity(user);
+  for (const [file_url,is_private,owner] of [
+    ['/files/avatar.jpg',0,'someone-else'],
+    ['/files/avatar.jpg',1,identity.erpUser],
+    ['/private/files/avatar.jpg',1,identity.erpUser],
+    ['https://other.test/avatar.jpg',0,identity.erpUser],
+    ['//other.test/files/avatar.jpg',0,identity.erpUser],
+    ['/files/%2e%2e%2fprivate/avatar.jpg',0,identity.erpUser],
+    ['/files/avatar.jpg?redirect=elsewhere',0,identity.erpUser],
+    ['/files/avatar.svg',0,identity.erpUser],
+  ]) {
+    const file=await erp.create('File',{attached_to_doctype:'Mobile App User',attached_to_name:owner,file_url,is_private});
+    await assert.rejects(service.file(user,file.name),{status:404});
+  }
+});
+
+test('treatment images remain private and do not fall back to public ERP files',async()=>{
+  const {service,erp}=setup();
+  await fakeUpload(service,erp,{storage:'/files/treatment.jpg',expectedPrivacy:'1'});
+  await assert.rejects(service.upload(user,{...photo,purpose:'treatment'}),{code:'s3_required'});
 });

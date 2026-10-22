@@ -12,6 +12,18 @@ import {invoiceKit} from './invoice-kit.mjs';
 import {getErpHabitTracker,saveErpHabitTracker} from './erp-habit-tracker.mjs';
 import {prepareAppointmentMeet} from './appointment-meet.mjs';
 
+// Only ERP-hosted public images are exposed directly. Private/S3 treatment
+// attachments keep their existing signed-download path.
+const publicImageUrl = (erp, file) => {
+  if (Number(file.is_private) !== 0 || typeof file.file_url !== 'string') return null;
+  try {
+    const path = decodeURIComponent(file.file_url);
+    if (!/^\/files\/[^/\\?#\x00-\x1f]+\.(jpe?g|png|webp)$/i.test(path)) return null;
+    const url = new URL(file.file_url, erp.url);
+    return url.origin === new URL(erp.url).origin ? url.href : null;
+  } catch { return null; }
+};
+
 const day = () => new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit'}).format(new Date());
 const statuses = {Pending: 'pending', Approved: 'confirmed', Confirmed: 'confirmed', 'Checked In': 'checked_in', Completed: 'completed', Cancelled: 'cancelled'};
 export const appointmentStatus = value => statuses[value] || 'pending';
@@ -89,8 +101,8 @@ export class MobileService {
     const files = imageReference ? await this.erp.list('File', {
       attached_to_doctype: 'Mobile App User', attached_to_name: identity.erpUser,
       file_url: imageReference,
-    }, ['name','file_url'], {limit: 1}) : [];
-    const image = files.find(file => file.file_url?.startsWith('s3://'));
+    }, ['name','file_url','is_private'], {limit: 1}) : [];
+    const image = files.find(file => file.file_url?.startsWith('s3://') || publicImageUrl(this.erp,file));
     return {data: {...(record?.data || {}), name: parent.full_name || user.name,
       imageFileId: image?.name || null, imageSyncPending: Boolean(parent.image && !image),
       email: user.email, phone: user.phone,
@@ -649,7 +661,7 @@ export class MobileService {
     const form = new FormData(); const ext = {'image/jpeg':'jpg','image/png':'png','image/webp':'webp'}[body.mimeType];
     const uploadName = `${randomUUID()}.${ext}`;
     form.append('file', new Blob([bytes], {type:body.mimeType}), uploadName);
-    form.append('is_private','1'); form.append('doctype','Mobile App User'); form.append('docname',identity.erpUser);
+    form.append('is_private',isProfile ? '0' : '1'); form.append('doctype','Mobile App User'); form.append('docname',identity.erpUser);
     let uploaded;
     try {
       uploaded = await this.erp.request('/api/method/upload_file', {method:'POST',body:form,timeoutMs:50000});
@@ -665,13 +677,16 @@ export class MobileService {
     const file = await this.erp.get('File', uploaded.name);
     requireValue(file.attached_to_doctype === 'Mobile App User' && file.attached_to_name === identity.erpUser,
       'Uploaded file does not belong to your profile', 409);
-    requireValue(file.file_url?.startsWith('s3://'), 'ERP S3 upload is not enabled. Please contact the clinic.', 503, 's3_required');
+    requireValue(file.file_url?.startsWith('s3://') || (isProfile && publicImageUrl(this.erp,file)),
+      isProfile ? 'ERP did not save a supported profile image.' : 'ERP S3 upload is not enabled. Please contact the clinic.',
+      503, isProfile ? 'image_storage_unavailable' : 's3_required');
     if (isProfile) {
       // Keep the ERP Desk avatar in sync. Passing modified rejects an overwrite
       // if clinic staff changed this document while the file was uploading.
-      // Desk needs an HTTP image URL. This stable ERP route uses the logged-in
-      // ERP session to serve the private S3 file; never store an expiring link.
-      const image = `/api/method/frappe.handler.download_file?${new URLSearchParams({file_url:file.file_url})}`;
+      // Public profile photos use their stable ERP path; S3 photos retain the
+      // ERP download route, never an expiring signed URL.
+      const image = publicImageUrl(this.erp,file) ? file.file_url :
+        `/api/method/frappe.handler.download_file?${new URLSearchParams({file_url:file.file_url})}`;
       await this.erp.update('Mobile App User', identity.erpUser,
         {image, ...(parent.modified ? {modified:parent.modified} : {})});
     }
@@ -681,6 +696,8 @@ export class MobileService {
     const identity = await this.identity(user);
     const file = await this.erp.get('File', id);
     requireValue(file.attached_to_doctype === 'Mobile App User' && file.attached_to_name === identity.erpUser, 'File not found',404);
+    const publicUrl = publicImageUrl(this.erp,file);
+    if (publicUrl) return {url:publicUrl,expiresIn:300};
     requireValue(file.file_url?.startsWith('s3://'), 'File is not available',404);
     const signed = await this.erp.method(this.s3PresignMethod, {file_url:file.file_url,expires:300});
     const url = typeof signed === 'string' ? signed : signed?.url;
