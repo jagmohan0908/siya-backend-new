@@ -668,3 +668,18 @@ The local recovered Seedfit payment credentials are test mode. Bookings default
 to disabled until the existing Seedfit workflow and server configuration are
 verified. No deployment or release is implied by this source change. See the
 Seedfit repository's `docs/ERP_INTEGRATION.md` for the app flow and rollout checks.
+
+### Diagnosing failed mobile API requests
+
+Failed requests log a server-generated `request_id`, the HTTP method, a route
+template and elapsed milliseconds. The same ID is returned in the
+`X-Request-ID` response header. ERP failures additionally log a sanitized
+`erp_route`, `erp_method`, `upstream_status` and allowlisted
+`upstream_exception`; connection failures use `upstream_failure`.
+
+Use these fields to distinguish mobile authentication failures from ERP
+permission, schema and connection failures. Unknown routes/error classes are
+redacted. Logs never include query values, record IDs, headers, tokens, request
+bodies or ERP tracebacks. Existing response bodies and status handling remain
+unchanged. Historical log entries cannot be enriched: reproduce the failing
+action after deployment, then correlate its request ID with the new log.

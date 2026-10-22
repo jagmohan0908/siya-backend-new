@@ -1,4 +1,6 @@
 import {createServer} from 'node:http';
+import {randomUUID} from 'node:crypto';
+import {apiRoute, httpMethod} from './diagnostics.mjs';
 import {pathToFileURL} from 'node:url';
 import {Erp} from './erp.mjs';
 import {ApiError, requireValue} from './errors.mjs';
@@ -11,9 +13,11 @@ async function readBody(req) {
   try { return JSON.parse(Buffer.concat(chunks).toString()); } catch { throw new ApiError(400,'invalid_json','Invalid JSON'); }
 }
 
-export function createApi({service: defaultService, authenticate: defaultAuthenticate, tenants, origins = [], allowBookings: defaultBookings = false}) {
+export function createApi({service: defaultService, authenticate: defaultAuthenticate, tenants, origins = [], allowBookings: defaultBookings = false, logError = entry => console.error(JSON.stringify(entry))}) {
   const limits = new Map();
   const server = createServer(async (req,res) => {
+    const requestId = randomUUID(), started = Date.now();
+    res.setHeader('X-Request-ID', requestId);
     res.setHeader('Cache-Control','no-store'); res.setHeader('X-Content-Type-Options','nosniff');
     try {
       const origin = req.headers.origin;
@@ -105,7 +109,10 @@ export function createApi({service: defaultService, authenticate: defaultAuthent
       res.end(JSON.stringify({error:{code:error instanceof ApiError ? error.code : 'temporarily_unavailable',
         message:error instanceof ApiError ? error.message : 'Service is temporarily unavailable. Please try again.'}}));
       // No request bodies, tokens or medical details in logs.
-      console.error(JSON.stringify({event:'request_failed',status:res.statusCode,code:error.code || 'internal'}));
+      logError({event:'request_failed', request_id:requestId,
+        method:httpMethod(req.method), route:apiRoute(req.url),
+        status:res.statusCode, code:error instanceof ApiError ? error.code : 'internal',
+        duration_ms:Date.now() - started, ...error.erpDiagnostic});
     }
   });
   server.requestTimeout = 30000; server.headersTimeout = 10000;
