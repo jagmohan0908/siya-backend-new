@@ -40,7 +40,11 @@ export class SupportTickets {
     const options=paging(query);
     const rows=await this.erp.list('Support Ticket',filters,['name'],{...options,order:'creation desc, name desc'});
     const items=[];
-    for(const row of rows) items.push(ticketDto(await this.owned(user,appId,row.name)));
+    for(let i=0;i<rows.length;i+=4) {
+      const batch=await Promise.all(rows.slice(i,i+4).map(async row=>
+        ticketDto(await this.owned(user,appId,row.name))));
+      items.push(...batch);
+    }
     return {items};
   }
   async create(user,appId,body) {

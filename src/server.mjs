@@ -5,6 +5,7 @@ import {pathToFileURL} from 'node:url';
 import {Erp} from './erp.mjs';
 import {ApiError, requireValue} from './errors.mjs';
 import {createTenants} from './tenants.mjs';
+import {withErpReadScope} from './request-reads.mjs';
 
 async function readBody(req) {
   requireValue((req.headers['content-type'] || '').startsWith('application/json'), 'Use application/json',415);
@@ -15,7 +16,7 @@ async function readBody(req) {
 
 export function createApi({service: defaultService, authenticate: defaultAuthenticate, tenants, origins = [], allowBookings: defaultBookings = false, logError = entry => console.error(JSON.stringify(entry))}) {
   const limits = new Map();
-  const server = createServer(async (req,res) => {
+  const server = createServer((req,res) => withErpReadScope(async () => {
     const requestId = randomUUID(), started = Date.now();
     res.setHeader('X-Request-ID', requestId);
     res.setHeader('Cache-Control','no-store'); res.setHeader('X-Content-Type-Options','nosniff');
@@ -114,7 +115,7 @@ export function createApi({service: defaultService, authenticate: defaultAuthent
         status:res.statusCode, code:error instanceof ApiError ? error.code : 'internal',
         duration_ms:Date.now() - started, ...error.erpDiagnostic});
     }
-  });
+  }));
   server.requestTimeout = 30000; server.headersTimeout = 10000;
   return server;
 }

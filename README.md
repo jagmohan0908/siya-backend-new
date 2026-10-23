@@ -683,3 +683,22 @@ redacted. Logs never include query values, record IDs, headers, tokens, request
 bodies or ERP tracebacks. Existing response bodies and status handling remain
 unchanged. Historical log entries cannot be enriched: reproduce the failing
 action after deployment, then correlate its request ID with the new log.
+
+### Shared backend performance (23 October 2026)
+
+Identical ERP resource reads are coalesced within each HTTP request. Each caller
+receives a separate document copy, and the next request rechecks current ERP
+permissions and patient links. Writes, failures of writes, and custom ERP methods
+invalidate cached reads before and after execution. Failed reads and binary
+streams are not cached. This applies to both brands without sharing customer
+responses between requests.
+
+Support ticket details load in batches of four with unchanged ownership checks
+and ordering. Regression tests cover both brands, changed patient links, writes,
+failed requests, independent streams and parallel request isolation. Controlled
+profile checks use three upstream calls instead of four. A local nine-ticket
+fixture with simulated 25 ms upstream latency took 124 ms versus 308 ms using the
+previous serial loop; this is not a production timing guarantee.
+
+Deploying this backend update requires no Flutter rebuild or ERP migration. It
+does not create or modify patient links for accounts missing an approved mapping.

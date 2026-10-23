@@ -1,12 +1,16 @@
 import {ApiError} from './errors.mjs';
 import {erpFailureDetails, erpTransportDetails} from './diagnostics.mjs';
+import {requestRead} from './request-reads.mjs';
 
 export class Erp {
   constructor({url, token, fetcher = fetch}) {
     this.url = url.replace(/\/$/, ''); this.token = token; this.fetcher = fetcher;
     this.isNgrok = new URL(this.url).hostname.endsWith('.ngrok-free.dev');
   }
-  async request(path, {method = 'GET', body, raw = false, timeoutMs = 25000} = {}) {
+  request(path, options = {}) {
+    return requestRead(this, path, options, () => this.fetchRequest(path, options));
+  }
+  async fetchRequest(path, {method = 'GET', body, raw = false, timeoutMs = 25000} = {}) {
     let response;
     try { response = await this.fetcher(`${this.url}${path}`, {
       method, headers: {Authorization: `token ${this.token}`, ...(this.isNgrok ? {'ngrok-skip-browser-warning':'1'} : {}), ...(body instanceof FormData ? {} : {'Content-Type': 'application/json'})},
