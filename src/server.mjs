@@ -48,7 +48,11 @@ export function createApi({service: defaultService, authenticate: defaultAuthent
       const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
       let result;
       if (req.method === 'GET' && url.pathname === '/health') result = {ok:true,version:1};
-      else if (req.method === 'POST' && url.pathname === '/v1/shopify-order-created') result = await service.checkoutTracking.receive(await readRawBody(req),req.headers);
+      else if (req.method === 'POST' && url.pathname === '/v1/shopify-order-created') {
+        result = await service.checkoutTracking.receive(await readRawBody(req),req.headers);
+        // Delivery diagnostics contain no order, account, contact, or payload data.
+        console.info(JSON.stringify({event:'shopify_order_notification',app_id:appId,tracked:result.tracked}));
+      }
       else if (req.method === 'GET' && url.pathname === '/v1/doctors') result = await service.doctors(appId);
       else if (req.method === 'GET' && parts.length === 4 && parts[0] === 'v1' && parts[1] === 'doctors' && parts[3] === 'photo') result = await service.doctorPhoto(parts[2],appId);
       else if (req.method === 'GET' && url.pathname === '/v1/review-avatars') result = await service.reviewAvatars();

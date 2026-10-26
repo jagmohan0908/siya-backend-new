@@ -1,7 +1,7 @@
 // Only fixed route templates and known error classes belong in operational logs.
 // Never log raw URLs, query strings, document IDs, bodies, headers or tracebacks.
 const apiRoutes = [
-  '/', '/health', '/v1/doctors', '/v1/doctors/:id/photo', '/v1/doctors/:id/slots',
+  '/', '/health', '/v1/checkout-intents', '/v1/shopify-order-created', '/v1/doctors', '/v1/doctors/:id/photo', '/v1/doctors/:id/slots',
   '/v1/review-avatars', '/v1/profile', '/v1/appointments', '/v1/appointment-orders',
   '/v1/appointments/:id/requests', '/v1/treatments', '/v1/diets', '/v1/diets/:id/pdf',
   '/v1/habit-orders', '/v1/habit-tracker', '/v1/habit-prescriptions', '/v1/habits',
