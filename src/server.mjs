@@ -7,11 +7,15 @@ import {ApiError, requireValue} from './errors.mjs';
 import {createTenants} from './tenants.mjs';
 import {withErpReadScope} from './request-reads.mjs';
 
-async function readBody(req) {
+async function readRawBody(req) {
   requireValue((req.headers['content-type'] || '').startsWith('application/json'), 'Use application/json',415);
   let size = 0; const chunks = [];
   for await (const chunk of req) { size += chunk.length; requireValue(size <= 12_000_000,'Request too large',413); chunks.push(chunk); }
-  try { return JSON.parse(Buffer.concat(chunks).toString()); } catch { throw new ApiError(400,'invalid_json','Invalid JSON'); }
+  return Buffer.concat(chunks);
+}
+async function readBody(req) {
+  const raw = await readRawBody(req);
+  try { return JSON.parse(raw.toString()); } catch { throw new ApiError(400,'invalid_json','Invalid JSON'); }
 }
 
 export function createApi({service: defaultService, authenticate: defaultAuthenticate, tenants, origins = [], allowBookings: defaultBookings = false, logError = entry => console.error(JSON.stringify(entry))}) {
@@ -44,6 +48,7 @@ export function createApi({service: defaultService, authenticate: defaultAuthent
       const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
       let result;
       if (req.method === 'GET' && url.pathname === '/health') result = {ok:true,version:1};
+      else if (req.method === 'POST' && url.pathname === '/v1/shopify-order-created') result = await service.checkoutTracking.receive(await readRawBody(req),req.headers);
       else if (req.method === 'GET' && url.pathname === '/v1/doctors') result = await service.doctors(appId);
       else if (req.method === 'GET' && parts.length === 4 && parts[0] === 'v1' && parts[1] === 'doctors' && parts[3] === 'photo') result = await service.doctorPhoto(parts[2],appId);
       else if (req.method === 'GET' && url.pathname === '/v1/review-avatars') result = await service.reviewAvatars();
@@ -54,6 +59,7 @@ export function createApi({service: defaultService, authenticate: defaultAuthent
         const body = ['POST','PUT'].includes(req.method) ? await readBody(req) : {};
         result = await service.queue.run(user.id,async () => {
           const route = `${req.method} ${url.pathname}`;
+          if (route === 'POST /v1/checkout-intents') return service.checkoutTracking.begin(user,body);
           if (route==='POST /v1/ai-chat/session') return service.aiChat.call(user,appId,'open_session',body);
           if (route==='POST /v1/ai-chat/new-session') return service.aiChat.call(user,appId,'new_session',body);
           if (route==='GET /v1/ai-chat/messages') return service.aiChat.call(user,appId,'get_messages',Object.fromEntries(url.searchParams));

@@ -12,6 +12,7 @@ import {invoiceKit} from './invoice-kit.mjs';
 import {getErpHabitTracker,saveErpHabitTracker} from './erp-habit-tracker.mjs';
 import {prepareAppointmentMeet} from './appointment-meet.mjs';
 import {recoverPatientLink} from './patient-link.mjs';
+import {CheckoutTracking} from './checkout-tracking.mjs';
 
 // Only ERP-hosted public images are exposed directly. Private/S3 treatment
 // attachments keep their existing signed-download path.
@@ -46,11 +47,12 @@ const doctorTag = appId => {
 };
 
 export class MobileService {
-  constructor({erp, webhookUrl, webhookSecret, fetcher = fetch, rewardIssuer, payments, meetings, productImage = async () => '', productCatalog, chatProducts, appId = 'siya-ayurveda',
+  constructor({erp, webhookUrl, webhookSecret, fetcher = fetch, rewardIssuer, payments, meetings, productImage = async () => '', productCatalog, chatProducts, checkoutTracking, appId = 'siya-ayurveda',
     s3PresignMethod = 'sriaas_clinic.api.s3.presign.get_presigned_url'}) {
     Object.assign(this, {erp, webhookUrl, webhookSecret, fetcher, rewardIssuer, payments, meetings, productImage, productCatalog, chatProducts, s3PresignMethod});
     this.appId = appId;
     this.records = new Records(erp, appId === 'siya-ayurveda' ? '' : appId); this.queue = new SerialQueue();
+    this.checkoutTracking = new CheckoutTracking(this,checkoutTracking);
     this.assessments = new Assessments(erp);
     this.support = new SupportTickets(this);
     this.aiChat = new AiChat(this);
@@ -569,24 +571,41 @@ export class MobileService {
     return dietPdf(this.erp,await this.patient(user),id);
   }
   async orders(user, offset = 0) {
-    const patient = await this.patient(user);
     const identity = await this.identity(user);
+    const trackedIds = await this.checkoutTracking.ids(user);
+    requireValue(identity.patient || trackedIds.length, 'Please ask the clinic to link your patient record to your account.',409,'patient_link_required');
+    const patient = identity.patient ? await this.erp.get('Patient',identity.patient) : null;
     // Patient-scoped invoices prevent a shared Customer from exposing another family member's care.
     // List only core fields; optional shipping data is read from the owned document.
     // Return only the explicit order details below, never the raw ERP record.
-    const rows = await this.erp.list('Sales Invoice', identity.customers?.length ? {docstatus:1} : {patient: patient.name, docstatus: 1},
-      ['name','posting_date'], {offset, limit: 21, order: 'posting_date desc, name desc',
-        ...(identity.customers?.length ? {orFilters:[['patient','=',patient.name],['customer','in',identity.customers]]} : {})});
+    const legacyFilters = [...(patient ? [['patient','=',patient.name]] : []),
+      ...(identity.customers?.length ? [['customer','in',identity.customers]] : [])];
+    const limit = offset+21;
+    const rows = legacyFilters.length ? await this.erp.list('Sales Invoice',
+      !identity.customers?.length ? {docstatus:1,patient:patient.name} : {docstatus:1},
+      ['name','posting_date'],{limit,order:'posting_date desc, name desc',
+        ...(identity.customers?.length ? {orFilters:legacyFilters} : {})}) : [];
+    // Keep URL sizes bounded and combine before paging so duplicate invoices do not
+    // skip or repeat entries when an order is also visible through the Patient.
+    for (let i=0;i<trackedIds.length;i+=50) {
+      const linked=await this.erp.list('Sales Invoice',{docstatus:1,shopify_order_id:['in',trackedIds.slice(i,i+50)]},
+        ['name','posting_date','custom_app_brand'],{limit,order:'posting_date desc, name desc'});
+      rows.push(...linked.filter(row=>this.checkoutTracking.brandMatches(row)));
+    }
+    const invoiceRows=[...new Map(rows.map(row=>[row.name,row])).values()]
+      .sort((a,b)=>String(b.posting_date).localeCompare(String(a.posting_date)) || b.name.localeCompare(a.name));
     const orders = identity.customers?.length ? await this.erp.list('Sales Order', {customer:['in',identity.customers],docstatus:1,per_billed:['<',100]},
-      ['name','transaction_date','grand_total','currency','status'], {offset,limit:21,order:'transaction_date desc, name desc'}) : [];
+      ['name','transaction_date','grand_total','currency','status'], {limit,order:'transaction_date desc, name desc'}) : [];
     const items = [];
-    const documents = [...orders.slice(0,20).map(r=>({type:'Sales Order',name:r.name})),
-      ...rows.slice(0,20).map(r=>({type:'Sales Invoice',name:r.name}))];
+    const all = [...orders.map(r=>({type:'Sales Order',name:r.name,date:r.transaction_date})),
+      ...invoiceRows.map(r=>({type:'Sales Invoice',name:r.name,date:r.posting_date}))]
+      .sort((a,b)=>String(b.date).localeCompare(String(a.date)) || b.name.localeCompare(a.name));
+    const documents=all.slice(offset,offset+20);
     for (let i=0; i<documents.length; i+=4) {
       items.push(...await Promise.all(documents.slice(i,i+4).map(async row=>{
         const doc = await this.erp.get(row.type,row.name);
-        requireValue(doc.docstatus === 1 && (row.type === 'Sales Invoice' && doc.patient === patient.name ||
-          identity.customers?.includes(doc.customer)), 'Order not found',404);
+        requireValue(doc.docstatus === 1 && (row.type === 'Sales Invoice' && patient && doc.patient === patient.name ||
+          identity.customers?.includes(doc.customer) || row.type === 'Sales Invoice' && await this.checkoutTracking.owns(user,doc)), 'Order not found',404);
         const shipment = row.type === 'Sales Invoice' ? await this.invoiceShipment(doc,{optional:true}) : null;
         return orderDetails({...doc,doctype:row.type},patient,this.productImage,
           row.type === 'Sales Invoice' ? trackingSummary(doc,shipment) : null,
@@ -594,7 +613,7 @@ export class MobileService {
       })));
     }
     return {items:items.sort((a,b)=>String(b.date).localeCompare(String(a.date))),
-      nextCursor: rows.length > 20 || orders.length > 20 ? offset + 20 : null};
+      nextCursor: all.length > offset+20 ? offset + 20 : null};
   }
   async invoiceShipment(invoice, {optional = false} = {}) {
     if (!this.shipmentCapability || this.shipmentCapability.until < Date.now()) {
@@ -621,10 +640,11 @@ export class MobileService {
     return shipment;
   }
   async ownedInvoice(user, id) {
-    const patient = await this.patient(user);
     const identity=await this.identity(user);
     const invoice = await this.erp.get('Sales Invoice', id);
-    requireValue((invoice.patient === patient.name || identity.customers?.includes(invoice.customer)) && invoice.docstatus === 1, 'Invoice not found', 404);
+    requireValue((identity.patient && invoice.patient === identity.patient || identity.customers?.includes(invoice.customer) ||
+      await this.checkoutTracking.owns(user,invoice)) && invoice.docstatus === 1, 'Invoice not found', 404);
+    const patient = identity.patient ? await this.erp.get('Patient',identity.patient) : null;
     return {invoice,patient};
   }
   async invoice(user, id, pdf = false) {

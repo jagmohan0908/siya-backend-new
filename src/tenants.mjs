@@ -21,6 +21,7 @@ export function createTenants({erp, env = process.env, fetcher = fetch}) {
     // Sharing ERP does not imply sharing Shopify, payment accounts, or automation.
     const catalog = createProductCatalog({domain,storefrontToken,fetcher});
     const service = new MobileService({erp,appId,fetcher,
+      checkoutTracking:{domain,secret:read('SHOPIFY_ORDER_WEBHOOK_SECRET'),enabled:read('CHECKOUT_TRACKING_ENABLED') === 'true'},
       webhookUrl:read('APPOINTMENT_WEBHOOK_URL'),webhookSecret:read('APPOINTMENT_WEBHOOK_SECRET'),
       s3PresignMethod:env.S3_PRESIGN_METHOD,
       productCatalog:catalog,productImage:async item=>(await catalog(item)).imageUrl,
