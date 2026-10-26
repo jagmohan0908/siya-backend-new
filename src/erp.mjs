@@ -54,6 +54,8 @@ export class Erp {
     })}`);
   }
   get(type, name) { return this.request(`/api/resource/${encodeURIComponent(type)}/${encodeURIComponent(name)}`); }
+  // Used before optimistic writes; bypass request-local read reuse.
+  fresh(type, name) { return this.fetchRequest(`/api/resource/${encodeURIComponent(type)}/${encodeURIComponent(name)}`); }
   create(type, data) { return this.request(`/api/resource/${encodeURIComponent(type)}`, {method: 'POST', body: data}); }
   update(type, name, data) { return this.request(`/api/resource/${encodeURIComponent(type)}/${encodeURIComponent(name)}`, {method: 'PUT', body: data}); }
   async maybe(type, name) {

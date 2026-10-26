@@ -11,6 +11,7 @@ import {habitOrders, habitPrescriptions} from './invoice-habits.mjs';
 import {invoiceKit} from './invoice-kit.mjs';
 import {getErpHabitTracker,saveErpHabitTracker} from './erp-habit-tracker.mjs';
 import {prepareAppointmentMeet} from './appointment-meet.mjs';
+import {recoverPatientLink} from './patient-link.mjs';
 
 // Only ERP-hosted public images are exposed directly. Private/S3 treatment
 // attachments keep their existing signed-download path.
@@ -61,11 +62,18 @@ export class MobileService {
     if (record) {
       // The cached record locates the account; current ERP profiles authorize
       // patient access on every platform, including later linking/unlinking.
-      const parent = await this.erp.get('Mobile App User',record.data.erpUser);
+      let parent = await this.erp.get('Mobile App User',record.data.erpUser);
+      requireValue(ids.includes(parent.external_id),
+        'Your account needs to be linked by the clinic',409,'identity_link_required');
+      const previousParent = parent;
+      parent = await recoverPatientLink(this.erp,user,parent,record.data,this.appId);
       requireValue(ids.includes(parent.external_id),
         'Your account needs to be linked by the clinic',409,'identity_link_required');
       const patients = [...new Set((parent.profiles || []).map(p=>p.patient_id).filter(Boolean))];
       const patient = patients.length === 1 ? patients[0] : null;
+      if (parent !== previousParent && patient && !record.data.patient) {
+        await this.records.write(user.id,'identity','self',{erpUser:parent.name,patient},record.revision);
+      }
       // Preserve separately reviewed billing access only while its patient link
       // is still current; changing the profile must not inherit that grant.
       return {erpUser:parent.name,patient,
@@ -76,8 +84,11 @@ export class MobileService {
     // Keep existing Siya identities unchanged. Other stores have their own ERP identity.
     let matches = await this.erp.list('Mobile App User', {external_id: ['in', ids]}, ['name'], {limit: 2});
     requireValue(matches.length < 2, 'Your account needs to be linked by the clinic', 409, 'identity_link_required');
-    const parent = matches.length ? await this.erp.get('Mobile App User', matches[0].name) :
+    let parent = matches.length ? await this.erp.get('Mobile App User', matches[0].name) :
       await this.erp.create('Mobile App User', {external_id: externalId, full_name: user.name, phone: user.phone, is_active: 1});
+    parent = await recoverPatientLink(this.erp,user,parent,null,this.appId);
+    requireValue(ids.includes(parent.external_id),
+      'Your account needs to be linked by the clinic',409,'identity_link_required');
     const patients = [...new Set((parent.profiles || []).map(p => p.patient_id).filter(Boolean))];
     const data = {erpUser: parent.name, patient: patients.length === 1 ? patients[0] : null};
     await this.records.write(user.id, 'identity', 'self', data, 0);
