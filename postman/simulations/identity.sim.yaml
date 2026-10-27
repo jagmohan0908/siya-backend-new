@@ -1,0 +1,6 @@
+simulation: identity
+routing: path
+mocks:
+  - name: shopify-identity
+    routeKey: shopify
+    path: postman/mocks/shopify-identity
