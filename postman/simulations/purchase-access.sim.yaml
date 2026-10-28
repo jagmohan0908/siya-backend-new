@@ -1,0 +1,6 @@
+simulation: purchase-access
+routing: path
+mocks:
+  - name: purchase-erp
+    routeKey: erp
+    path: postman/mocks/purchase-erp

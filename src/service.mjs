@@ -1,3 +1,4 @@
+import {trackedInvoices} from './purchase-invoices.mjs';
 import {AiChat} from './ai-chat.mjs';
 import {SupportTickets} from './support-tickets.mjs';
 import {randomUUID} from 'node:crypto';
@@ -564,11 +565,20 @@ export class MobileService {
     requireValue(patient, 'Please ask the clinic to link your patient record to your account.', 409, 'patient_link_required');
     return this.erp.get('Patient', patient);
   }
+  async dietContext(user) {
+    const identity = await this.identity(user);
+    const invoices = await trackedInvoices(this,user,{returns:true});
+    requireValue(identity.patient || invoices.some(doc => !doc.is_return),
+      'Please ask the clinic to link your patient record to your account.',409,'patient_link_required');
+    return {patient:identity.patient ? await this.erp.get('Patient',identity.patient) : null,invoices};
+  }
   async diets(user) {
-    return patientDiets(this.erp,await this.patient(user));
+    const {patient,invoices} = await this.dietContext(user);
+    return patientDiets(this.erp,patient,invoices);
   }
   async dietPdf(user, id) {
-    return dietPdf(this.erp,await this.patient(user),id);
+    const {patient,invoices} = await this.dietContext(user);
+    return dietPdf(this.erp,patient,id,invoices);
   }
   async orders(user, offset = 0) {
     const identity = await this.identity(user);

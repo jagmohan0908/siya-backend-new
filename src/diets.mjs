@@ -9,10 +9,10 @@ async function all(erp, type, filters, fields) {
   }
 }
 
-export async function patientDiets(erp, patient) {
+export async function patientDiets(erp, patient, verifiedInvoices = []) {
   const [links, chartRows] = await Promise.all([
-    all(erp,'Patient Encounter',{patient:patient.name,docstatus:['<',2],diet_chart:['is','set']},
-      ['name','diet_chart','encounter_date']),
+    patient ? all(erp,'Patient Encounter',{patient:patient.name,docstatus:['<',2],diet_chart:['is','set']},
+      ['name','diet_chart','encounter_date']) : [],
     all(erp,'Diet Chart',{},['name']),
   ]);
   const charts = [];
@@ -22,23 +22,25 @@ export async function patientDiets(erp, patient) {
   const mappedCodes = new Set(charts.flatMap(c=>(c.custom_items || []).map(i=>i.item_code)).filter(Boolean));
   const purchases = new Map();
   if (mappedCodes.size) {
-    // Patient-scoped invoices only: a shared Customer must not grant clinical access.
-    const rows = await all(erp,'Sales Invoice',{patient:patient.name,docstatus:1},['name']);
+    // Include explicit account-owned purchases, never arbitrary phone/customer matches.
+    const documents = new Map(verifiedInvoices.map(doc => [doc.name,doc]));
+    const rows = patient ? await all(erp,'Sales Invoice',{patient:patient.name,docstatus:1},['name']) : [];
     for (let i=0;i<rows.length;i+=4) {
       const docs = await Promise.all(rows.slice(i,i+4).map(row=>erp.get('Sales Invoice',row.name)));
-      for (const invoice of docs) {
-        if (invoice.patient !== patient.name || invoice.docstatus !== 1) continue;
-        for (const item of invoice.items || []) {
-          if (!mappedCodes.has(item.item_code)) continue;
-          const quantity = Number(item.stock_qty ?? item.qty);
-          if (!Number.isFinite(quantity)) continue;
-          const previous = purchases.get(item.item_code) || {quantity:0,code:item.item_code,name:item.item_name || item.item_code,date:''};
-          previous.quantity += invoice.is_return ? -Math.abs(quantity) : quantity;
-          if (!invoice.is_return && quantity > 0 && String(invoice.posting_date) > previous.date) {
-            previous.date = invoice.posting_date;
-          }
-          purchases.set(item.item_code,previous);
-        }
+      for (const invoice of docs) if (invoice.patient === patient.name && invoice.docstatus === 1) {
+        documents.set(invoice.name,invoice);
+      }
+    }
+    for (const invoice of documents.values()) {
+      if (invoice.docstatus !== 1) continue;
+      for (const item of invoice.items || []) {
+        if (!mappedCodes.has(item.item_code)) continue;
+        const quantity = Number(item.stock_qty ?? item.qty);
+        if (!Number.isFinite(quantity)) continue;
+        const previous = purchases.get(item.item_code) || {quantity:0,code:item.item_code,name:item.item_name || item.item_code,date:''};
+        previous.quantity += invoice.is_return ? -Math.abs(quantity) : quantity;
+        if (!invoice.is_return && quantity > 0 && String(invoice.posting_date) > previous.date) previous.date = invoice.posting_date;
+        purchases.set(item.item_code,previous);
       }
     }
   }
@@ -60,9 +62,9 @@ export async function patientDiets(erp, patient) {
   return {items:items.sort((a,b)=>String(b.date).localeCompare(String(a.date)))};
 }
 
-export async function dietPdf(erp, patient, id) {
+export async function dietPdf(erp, patient, id, verifiedInvoices = []) {
   // Re-evaluate ownership, returns and mappings on every download.
-  const {items} = await patientDiets(erp,patient);
+  const {items} = await patientDiets(erp,patient,verifiedInvoices);
   requireValue(items.some(chart=>chart.id === id && chart.hasPdf),'Diet chart not found',404);
   const chart = await erp.get('Diet Chart',id);
   let file;

@@ -229,3 +229,95 @@ test('single-product habit purchases carry the matched Shopify reorder product I
   assert.equal(tracker.orders[0].items[0].shopifyProductId,'gid://shopify/Product/123');
   assert.equal(tracker.orders[0].items[0].imageUrl,'https://cdn.shopify.com/cream.jpg');
 });
+
+async function trackPurchase(service, account, orderId, appId=service.appId) {
+  service.checkoutTracking.domain='test.myshopify.com';
+  await service.records.write(account.id,'order-owner',orderId,{orderId,appId,shopDomain:'test.myshopify.com'},0);
+}
+
+test('tracked purchase supplies diet, PDF and habit products despite different invoice Patient',async()=>{
+  const {erp,service,invoice}=setup();
+  service.identity=async()=>({erpUser:user.id,patient:'PAT-A'});
+  erp.add('Patient',{name:'PAT-A'});
+  erp.add('Sales Invoice',{...invoice,patient:'PAT-B',shopify_order_id:'123',custom_app_brand:'Siya Ayurveda'});
+  erp.add('Diet Chart',{name:'DIET',custom_items:[{item_code:'CREAM'}],custom_diet_chart_pdf:'/files/diet.pdf'});
+  erp.url='https://erp.test';erp.request=async()=>new Response('%PDF-synthetic');
+  await trackPurchase(service,user,'123');
+  assert.deepEqual((await service.diets(user)).items.map(d=>d.id),['DIET']);
+  assert.equal(await (await service.dietPdf(user,'DIET')).text(),'%PDF-synthetic');
+  assert.deepEqual((await service.habitOrders(user,app)).items.map(i=>i.id),['INV/1']);
+  assert.equal((await service.erpHabitTracker(user,app)).data.habits.length,2);
+  assert.deepEqual((await service.habitPrescriptions(user,app)).items,[]);
+  // Revocation is effective on the next read, including PDF downloads.
+  erp.docs.delete(`Siya Mobile Record/${service.records.key(user.id,'order-owner','123')}`);
+  assert.deepEqual((await service.diets(user)).items,[]);
+  await assert.rejects(service.dietPdf(user,'DIET'),{status:404});
+  assert.deepEqual((await service.habitOrders(user,app)).items,[]);
+});
+
+test('purchase charts work without a Patient link; other brands and accounts get no grant',async()=>{
+  const {erp,service,invoice}=setup();
+  service.identity=async()=>({erpUser:user.id,patient:null});
+  service.patient=async()=>{throw new ApiError(409,'patient_link_required','Link required');};
+  erp.add('Sales Invoice',{...invoice,patient:'PAT-B',shopify_order_id:'123',custom_app_brand:'Siya Ayurveda'});
+  erp.add('Diet Chart',{name:'DIET',custom_items:[{item_code:'CREAM'}]});
+  await trackPurchase(service,user,'123');
+  assert.equal((await service.diets(user)).items.length,1);
+  assert.equal((await service.habitOrders(user,app)).items.length,1);
+  await assert.rejects(service.diets({id:'other-account'}),{code:'patient_link_required'});
+  erp.add('Sales Invoice',{...invoice,patient:'PAT-B',shopify_order_id:'123',custom_app_brand:'Seedfit'});
+  await assert.rejects(service.diets(user),{code:'patient_link_required'});
+});
+
+test('returns revoke purchase chart and tracking even when credit note has another Patient',async()=>{
+  const {erp,service,invoice}=setup();
+  service.identity=async()=>({erpUser:user.id,patient:'PAT-A'});erp.add('Patient',{name:'PAT-A'});
+  erp.add('Sales Invoice',{...invoice,patient:'PAT-B',shopify_order_id:'123'});
+  erp.add('Diet Chart',{name:'DIET',custom_items:[{item_code:'CREAM'}]});
+  await trackPurchase(service,user,'123');
+  erp.add('Sales Invoice',{...invoice,name:'RETURN',patient:'PAT-C',is_return:1,return_against:invoice.name,
+    items:[{item_code:'CREAM',qty:-2},{item_code:'WASH',qty:-1}]});
+  assert.deepEqual((await service.diets(user)).items,[]);
+  assert.ok((await service.habitOrders(user,app)).items[0].items.every(i=>!i.canTrack));
+});
+
+test('tracked and patient invoice overlap is counted once for diet returns and habit pages',async()=>{
+  const {erp,service,invoice}=setup();
+  service.identity=async()=>({erpUser:user.id,patient:'PAT-A'});erp.add('Patient',{name:'PAT-A'});
+  erp.add('Sales Invoice',{...invoice,shopify_order_id:'123'});
+  erp.add('Diet Chart',{name:'DIET',custom_items:[{item_code:'CREAM'}]});
+  await trackPurchase(service,user,'123');
+  erp.add('Sales Invoice',{...invoice,name:'RETURN',is_return:1,return_against:invoice.name,items:[{item_code:'CREAM',qty:-2}]});
+  assert.deepEqual((await service.diets(user)).items,[]);
+  assert.deepEqual((await service.habitOrders(user,app)).items.map(i=>i.id),['INV/1']);
+});
+
+test('Seedfit purchase grants stay in Seedfit and use its own store and brand',async()=>{
+  const {erp,invoice}=setup();
+  const seed=new MobileService({erp,appId:'seedfit',productImage:async()=>'',checkoutTracking:{domain:'seed.myshopify.com'}});
+  seed.identity=async()=>({erpUser:'seed-user',patient:'PAT-A'});
+  seed.patient=async()=>({name:'PAT-A'});
+  erp.add('Patient',{name:'PAT-A'});
+  erp.add('Sales Invoice',{...invoice,patient:'PAT-B',shopify_order_id:'456',custom_app_brand:'Seedfit'});
+  erp.add('Diet Chart',{name:'DIET',custom_items:[{item_code:'CREAM'}]});
+  await seed.records.write(user.id,'order-owner','456',{orderId:'456',appId:'seedfit',shopDomain:'seed.myshopify.com'},0);
+  assert.equal((await seed.diets(user)).items.length,1);
+  assert.equal((await seed.habitOrders(user,'seedfit')).items.length,1);
+  const siya=new MobileService({erp,productImage:async()=>'',checkoutTracking:{domain:'test.myshopify.com'}});
+  siya.identity=seed.identity;
+  assert.deepEqual((await siya.diets(user)).items,[]);
+  seed.checkoutTracking.domain='wrong.myshopify.com';
+  assert.deepEqual((await seed.diets(user)).items,[]);
+});
+
+test('mixed tracked and patient purchases paginate without repeating overlapping invoices',async()=>{
+  const {erp,service,invoice}=setup();
+  for(let i=2;i<=25;i++) erp.add('Sales Invoice',{...invoice,name:`INV/${String(i).padStart(2,'0')}`});
+  erp.add('Sales Invoice',{...invoice,shopify_order_id:'123'});
+  erp.add('Sales Invoice',{...invoice,name:'TRACKED',patient:'PAT-B',shopify_order_id:'124',posting_date:'2026-10-10'});
+  await trackPurchase(service,user,'123');await trackPurchase(service,user,'124');
+  const first=await service.habitOrders(user,app,0),second=await service.habitOrders(user,app,first.nextCursor);
+  assert.equal(first.items[0].id,'TRACKED');assert.equal(first.items.length,20);
+  assert.equal(second.items.length,6);assert.equal(second.nextCursor,null);
+  assert.equal(new Set([...first.items,...second.items].map(x=>x.id)).size,26);
+});

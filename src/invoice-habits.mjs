@@ -1,3 +1,4 @@
+import {trackedInvoices} from './purchase-invoices.mjs';
 import {requireValue} from './errors.mjs';
 import {assessmentApp} from './assessments.mjs';
 import {invoiceKit} from './invoice-kit.mjs';
@@ -16,7 +17,7 @@ async function all(erp,type,filters,fields) {
 }
 
 // Clinical tracking never grants access through a different patient's shared customer.
-const owns = (doc,patient,identity) => doc.patient === patient.name ||
+const owns = (doc,patient,identity) => (patient && doc.patient === patient.name) ||
   (!doc.patient && identity.customers?.includes(doc.customer));
 
 async function invoiceItems(service,doc) {
@@ -58,18 +59,26 @@ async function summary(service,doc) {
 export async function habitOrders(service,user,appId,offset=0,latestOnly=false) {
   assessmentApp(appId);
   requireValue(Number.isSafeInteger(offset) && offset>=0 && offset<=100000,'Invalid cursor');
-  const patient=await service.patient(user);
+  const tracked=await trackedInvoices(service,user);
+  let patient;
+  try { patient=await service.patient(user); }
+  catch (error) { if (error.code !== 'patient_link_required' || !tracked.length) throw error; }
   const identity=await service.identity(user);
-  const rows=await service.erp.list('Sales Invoice',
+  const trackedByName=new Map(tracked.map(doc=>[doc.name,doc]));
+  let rows=patient ? await service.erp.list('Sales Invoice',
     identity.customers?.length ? {docstatus:1,is_return:0} : {patient:patient.name,docstatus:1,is_return:0},
-    ['name'],{offset,limit:21,order:'posting_date desc, creation desc, name desc',
-      ...(identity.customers?.length ? {orFilters:[['patient','=',patient.name],['customer','in',identity.customers]]} : {})});
+    ['name','posting_date','creation'],{offset:tracked.length?0:offset,limit:tracked.length?offset+21:21,order:'posting_date desc, creation desc, name desc',
+      ...(identity.customers?.length ? {orFilters:[['patient','=',patient.name],['customer','in',identity.customers]]} : {})}) : [];
+  if (tracked.length) rows=[...new Map([...rows,...tracked].map(doc=>[doc.name,doc])).values()]
+    .sort((a,b)=>String(b.posting_date || '').localeCompare(String(a.posting_date || '')) ||
+      String(b.creation || '').localeCompare(String(a.creation || '')) || b.name.localeCompare(a.name))
+    .slice(offset,offset+21);
   const items=[];
   const batchSize=latestOnly?1:4;
   for(let i=0;i<Math.min(rows.length,20);i+=batchSize) {
     const batch=await Promise.all(rows.slice(i,Math.min(i+batchSize,20)).map(async row=>{
-      const doc=await service.erp.get('Sales Invoice',row.name);
-      return doc.docstatus===1 && !doc.is_return && owns(doc,patient,identity) ? summary(service,doc) : null;
+      const doc=trackedByName.get(row.name) || await service.erp.get('Sales Invoice',row.name);
+      return doc.docstatus===1 && !doc.is_return && (trackedByName.has(doc.name) || owns(doc,patient,identity)) ? summary(service,doc) : null;
     }));
     items.push(...batch.filter(Boolean));
     if(latestOnly && items.length) break;
