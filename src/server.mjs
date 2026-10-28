@@ -18,7 +18,7 @@ async function readBody(req) {
   try { return JSON.parse(raw.toString()); } catch { throw new ApiError(400,'invalid_json','Invalid JSON'); }
 }
 
-export function createApi({service: defaultService, authenticate: defaultAuthenticate, tenants, origins = [], allowBookings: defaultBookings = false, logError = entry => console.error(JSON.stringify(entry))}) {
+export function createApi({service: defaultService, authenticate: defaultAuthenticate, sessions: defaultSessions, tenants, origins = [], allowBookings: defaultBookings = false, logError = entry => console.error(JSON.stringify(entry))}) {
   const limits = new Map();
   const server = createServer((req,res) => withErpReadScope(async () => {
     const requestId = randomUUID(), started = Date.now();
@@ -44,6 +44,7 @@ export function createApi({service: defaultService, authenticate: defaultAuthent
       const tenant = url.pathname === '/health' ? null : tenants?.(appId);
       const service = tenant?.service ?? defaultService;
       const authenticate = tenant?.authenticate ?? defaultAuthenticate;
+      const sessions = tenant?.sessions ?? defaultSessions;
       const allowBookings = tenant?.allowBookings ?? defaultBookings;
       const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
       let result;
@@ -53,16 +54,32 @@ export function createApi({service: defaultService, authenticate: defaultAuthent
         // Delivery diagnostics contain no order, account, contact, or payload data.
         console.info(JSON.stringify({event:'shopify_order_notification',app_id:appId,tracked:result.tracked}));
       }
+      else if (req.method === 'POST' && url.pathname === '/v1/session') {
+        requireValue(sessions, 'App sessions are not configured yet.',503,'session_setup_required');
+        // Never turn a previous app session into a new absolute lifetime.
+        requireValue(!sessions.isSession(req.headers.authorization), 'Use your app session directly',400,'invalid_session_exchange');
+        await readBody(req);
+        const user = await authenticate(req.headers.authorization);
+        const identity = service.identity ? await service.queue.run(user.id,() => service.identity(user)) : null;
+        result = await sessions.issue(user,identity?.erpUser);
+      }
       else if (req.method === 'GET' && url.pathname === '/v1/doctors') result = await service.doctors(appId);
       else if (req.method === 'GET' && parts.length === 4 && parts[0] === 'v1' && parts[1] === 'doctors' && parts[3] === 'photo') result = await service.doctorPhoto(parts[2],appId);
       else if (req.method === 'GET' && url.pathname === '/v1/review-avatars') result = await service.reviewAvatars();
       else if (req.method === 'GET' && parts[0] === 'v1' && parts[1] === 'doctors' && parts[3] === 'slots') {
         result = await service.availability(parts[2],url.searchParams.get('date') || '',undefined,appId);
       } else {
-        const user = await authenticate(req.headers.authorization);
+        const appSession = sessions?.isSession(req.headers.authorization);
+        const user = appSession ? await sessions.use(req.headers.authorization) : await authenticate(req.headers.authorization);
         const body = ['POST','PUT'].includes(req.method) ? await readBody(req) : {};
         result = await service.queue.run(user.id,async () => {
           const route = `${req.method} ${url.pathname}`;
+          if (route === 'GET /v1/session') return {accountId:user.id};
+          if (route === 'POST /v1/session/logout') {
+            requireValue(appSession, 'An app session is required',401,'unauthenticated');
+            await sessions.use(req.headers.authorization,true);
+            return {ok:true};
+          }
           if (route === 'POST /v1/checkout-intents') return service.checkoutTracking.begin(user,body);
           if (route==='POST /v1/ai-chat/session') return service.aiChat.call(user,appId,'open_session',body);
           if (route==='POST /v1/ai-chat/new-session') return service.aiChat.call(user,appId,'new_session',body);

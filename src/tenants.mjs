@@ -6,6 +6,7 @@ import {AppsScriptMeet} from './appointment-meet.mjs';
 import {createProductCatalog} from './product-images.mjs';
 import {createChatProductSearch} from './chat-products.mjs';
 import {requireValue} from './errors.mjs';
+import {AppSessions} from './app-sessions.mjs';
 
 // A single deployment serves both apps. Never authenticate a Seedfit request
 // with Siya's credentials, even when Seedfit configuration is incomplete.
@@ -30,6 +31,7 @@ export function createTenants({erp, env = process.env, fetcher = fetch}) {
       meetings:new AppsScriptMeet({url:seed ? (read('GOOGLE_MEET_SCRIPT_URL') || '') : read('GOOGLE_MEET_SCRIPT_URL'),fetcher}),
       rewardIssuer:createRewardIssuer({domain,adminToken:read('SHOPIFY_ADMIN_TOKEN'),fetcher})});
     const tenant={service,authenticate:createAuthenticator({domain,storefrontToken,fetcher}),
+      sessions:new AppSessions({records:service.records,queue:service.queue,appId}),
       allowBookings:read('BOOKINGS_ENABLED')==='true'};
     cache.set(appId,tenant);
     return tenant;

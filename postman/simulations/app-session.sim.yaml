@@ -1,0 +1,9 @@
+simulation: app-session
+routing: path
+mocks:
+  - name: shopify-identity
+    routeKey: shopify
+    path: postman/mocks/shopify-identity
+  - name: checkout-erp
+    routeKey: erp
+    path: postman/mocks/checkout-erp
