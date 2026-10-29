@@ -5,7 +5,7 @@ http.createServer(async(req,res)=>{
  try {
   let docs=await pm.state.get('purchase-erp:docs') || {};
   if(u.pathname==='/test/seed'){await pm.state.set('purchase-erp:docs',req.body);return send(200,{ok:true});}
-  if(u.pathname==='/api/method/frappe.handler.download_file') {res.writeHead(200,{'content-type':'application/pdf'});return res.end('%PDF-synthetic');}
+  if(['/api/method/frappe.handler.download_file','/api/method/frappe.utils.print_format.download_pdf'].includes(u.pathname)) {res.writeHead(200,{'content-type':'application/pdf'});return res.end('%PDF-synthetic');}
   const p=u.pathname.split('/').filter(Boolean).map(decodeURIComponent);
   if(p[0]!=='api'||p[1]!=='resource')return send(501,{error:'Not modeled'});
   const type=p[2],name=p[3];
@@ -15,6 +15,8 @@ http.createServer(async(req,res)=>{
    const match=(d,k,v)=>!Array.isArray(v)?d[k]===v:v[0]==='in'?v[1].includes(d[k]):v[0]==='<'?d[k]<v[1]:v[0]==='is'?Boolean(d[k]):false;
    const filters=JSON.parse(u.searchParams.get('filters')||'{}'),or=JSON.parse(u.searchParams.get('or_filters')||'[]');
    const rows=Object.values(docs[type]).filter(d=>Object.entries(filters).every(([k,v])=>match(d,k,v))&&(!or.length||or.some(([k,op,v])=>match(d,k,op==='='?v:[op,v]))));
+   const order=u.searchParams.get('order_by')||'';
+   rows.sort((a,b)=>{for(const part of order.split(',')){const [field,direction]=part.trim().split(/\s+/);const result=String(a[field]||'').localeCompare(String(b[field]||''));if(result)return direction==='desc'?-result:result;}return 0;});
    const offset=Number(u.searchParams.get('limit_start')||0),limit=Number(u.searchParams.get('limit_page_length')||50);
    return send(200,{data:rows.slice(offset,offset+limit)});
   }

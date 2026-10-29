@@ -41,7 +41,7 @@ function setup() {
   erp.add('Mobile App User',{name:user.id,custom_habit_trackers:[],profiles:[{patient_id:'PAT-A'}]});
   erp.add('Item',{name:'CREAM',custom_mobile_habit_frequency:'twiceDaily',custom_mobile_habit_id:'vitiligo_cream'});
   erp.add('Item',{name:'WASH'});
-  const invoice={name:'INV/1',patient:'PAT-A',customer:'SHARED-CUSTOMER',docstatus:1,is_return:0,
+  const invoice={sr_si_patient_department:'Siya Ayurveda',name:'INV/1',patient:'PAT-A',customer:'SHARED-CUSTOMER',docstatus:1,is_return:0,
     posting_date:'2026-10-08',status:'Unpaid',items:[{item_code:'CREAM',item_name:'Single cream',qty:2,uom:'Nos'},
       {item_code:'WASH',item_name:'Single wash',qty:1,uom:'Nos'}]};
   erp.add('Sales Invoice',invoice);

@@ -1,4 +1,5 @@
 import {trackedInvoices} from './purchase-invoices.mjs';
+import {invoiceDepartmentFilter, invoiceMatchesDepartment} from './invoice-departments.mjs';
 import {AiChat} from './ai-chat.mjs';
 import {SupportTickets} from './support-tickets.mjs';
 import {randomUUID} from 'node:crypto';
@@ -592,20 +593,21 @@ export class MobileService {
       ...(identity.customers?.length ? [['customer','in',identity.customers]] : [])];
     const limit = offset+21;
     const rows = legacyFilters.length ? await this.erp.list('Sales Invoice',
-      !identity.customers?.length ? {docstatus:1,patient:patient.name} : {docstatus:1},
+      {...invoiceDepartmentFilter(this.appId),docstatus:1,...(!identity.customers?.length ? {patient:patient.name} : {})},
       ['name','posting_date'],{limit,order:'posting_date desc, name desc',
         ...(identity.customers?.length ? {orFilters:legacyFilters} : {})}) : [];
     // Keep URL sizes bounded and combine before paging so duplicate invoices do not
     // skip or repeat entries when an order is also visible through the Patient.
     for (let i=0;i<trackedIds.length;i+=50) {
-      const linked=await this.erp.list('Sales Invoice',{docstatus:1,shopify_order_id:['in',trackedIds.slice(i,i+50)]},
+      const linked=await this.erp.list('Sales Invoice',{...invoiceDepartmentFilter(this.appId),docstatus:1,shopify_order_id:['in',trackedIds.slice(i,i+50)]},
         ['name','posting_date','custom_app_brand'],{limit,order:'posting_date desc, name desc'});
       rows.push(...linked.filter(row=>this.checkoutTracking.brandMatches(row)));
     }
     const invoiceRows=[...new Map(rows.map(row=>[row.name,row])).values()]
       .sort((a,b)=>String(b.posting_date).localeCompare(String(a.posting_date)) || b.name.localeCompare(a.name));
-    const orders = identity.customers?.length ? await this.erp.list('Sales Order', {customer:['in',identity.customers],docstatus:1,per_billed:['<',100]},
-      ['name','transaction_date','grand_total','currency','status'], {limit,order:'transaction_date desc, name desc'}) : [];
+    // Sales Orders have no invoice department on this ERP. Show their submitted
+    // invoice when available rather than leaking unclassified legacy orders.
+    const orders = [];
     const items = [];
     const all = [...orders.map(r=>({type:'Sales Order',name:r.name,date:r.transaction_date})),
       ...invoiceRows.map(r=>({type:'Sales Invoice',name:r.name,date:r.posting_date}))]
@@ -614,7 +616,7 @@ export class MobileService {
     for (let i=0; i<documents.length; i+=4) {
       items.push(...await Promise.all(documents.slice(i,i+4).map(async row=>{
         const doc = await this.erp.get(row.type,row.name);
-        requireValue(doc.docstatus === 1 && (row.type === 'Sales Invoice' && patient && doc.patient === patient.name ||
+        requireValue(invoiceMatchesDepartment(this.appId,doc) && doc.docstatus === 1 && (row.type === 'Sales Invoice' && patient && doc.patient === patient.name ||
           identity.customers?.includes(doc.customer) || row.type === 'Sales Invoice' && await this.checkoutTracking.owns(user,doc)), 'Order not found',404);
         const shipment = row.type === 'Sales Invoice' ? await this.invoiceShipment(doc,{optional:true}) : null;
         return orderDetails({...doc,doctype:row.type},patient,this.productImage,
@@ -652,7 +654,7 @@ export class MobileService {
   async ownedInvoice(user, id) {
     const identity=await this.identity(user);
     const invoice = await this.erp.get('Sales Invoice', id);
-    requireValue((identity.patient && invoice.patient === identity.patient || identity.customers?.includes(invoice.customer) ||
+    requireValue(invoiceMatchesDepartment(this.appId,invoice) && (identity.patient && invoice.patient === identity.patient || identity.customers?.includes(invoice.customer) ||
       await this.checkoutTracking.owns(user,invoice)) && invoice.docstatus === 1, 'Invoice not found', 404);
     const patient = identity.patient ? await this.erp.get('Patient',identity.patient) : null;
     return {invoice,patient};

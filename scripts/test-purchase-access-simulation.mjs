@@ -15,7 +15,7 @@ const docs={
  'Patient Encounter':{},'Item Group Template':{},'DocType':{},
  'Item':{'CREAM':{name:'CREAM'}},
  'Diet Chart':{'DIET':{name:'DIET',custom_items:[{item_code:'CREAM'}],custom_diet_chart_pdf:'/files/diet.pdf'}},
- 'Sales Invoice':{'INV':{name:'INV',patient:'PAT-B',docstatus:1,is_return:0,shopify_order_id:'123',posting_date:'2026-10-28',items:[{item_code:'CREAM',qty:1}]}},
+ 'Sales Invoice':{'INV':{sr_si_patient_department:'Siya Ayurveda',name:'INV',patient:'PAT-B',docstatus:1,is_return:0,shopify_order_id:'123',posting_date:'2026-10-28',items:[{item_code:'CREAM',qty:1}]}},
  'Siya Mobile Record':{[identity.name]:identity,[grant.name]:grant},
 };
 const seed=()=>fetch(base+'/erp/test/seed',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(docs)});

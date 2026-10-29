@@ -457,8 +457,8 @@ test('invoice reads reject other patients and draft invoices',async () => {
   const identity=await service.records.read(user.id,'identity','self');
   const patient=await erp.create('Patient',{});
   await erp.update('Mobile App User',identity.data.erpUser,{profiles:[{patient_id:patient.name}]});
-  const other=await erp.create('Sales Invoice',{patient:'another-patient',docstatus:1,items:[]});
-  const draft=await erp.create('Sales Invoice',{patient:patient.name,docstatus:0,items:[]});
+  const other=await erp.create('Sales Invoice',{sr_si_patient_department:'Siya Ayurveda',patient:'another-patient',docstatus:1,items:[]});
+  const draft=await erp.create('Sales Invoice',{sr_si_patient_department:'Siya Ayurveda',patient:patient.name,docstatus:0,items:[]});
   await assert.rejects(service.invoice(user,other.name),{status:404});
   await assert.rejects(service.invoice(user,draft.name),{status:404});
 });
@@ -468,13 +468,13 @@ test('orders work without optional shipping columns and never expose raw invoice
     const identity=await service.records.read(user.id,'identity','self');
     const patient=await erp.create('Patient',{});
     await erp.update('Mobile App User',identity.data.erpUser,{profiles:[{patient_id:patient.name}]});
-    const invoice=await erp.create('Sales Invoice',{patient:patient.name,docstatus:1,grand_total:1499,currency:'INR',
+    const invoice=await erp.create('Sales Invoice',{sr_si_patient_department:'Siya Ayurveda',patient:patient.name,docstatus:1,grand_total:1499,currency:'INR',
       status:'Unpaid',remarks:'Private clinical notes',contact_email:'private@example.invalid',...shipping});
-    await erp.create('Sales Invoice',{patient:'another-patient',docstatus:1});
-    await erp.create('Sales Invoice',{patient:patient.name,docstatus:0});
+    await erp.create('Sales Invoice',{sr_si_patient_department:'Siya Ayurveda',patient:'another-patient',docstatus:1});
+    await erp.create('Sales Invoice',{sr_si_patient_department:'Siya Ayurveda',patient:patient.name,docstatus:0});
     const list=erp.list.bind(erp);
     erp.list=async(type,filters,fields,options)=>{
-      if(type==='Sales Invoice') {assert.deepEqual(fields,['name','posting_date']);assert.deepEqual(filters,{patient:patient.name,docstatus:1});}
+      if(type==='Sales Invoice') {assert.deepEqual(fields,['name','posting_date']);assert.deepEqual(filters,{patient:patient.name,docstatus:1,sr_si_patient_department:['in',['Skin/Fertility/Liver/IBS','Siya OPD','Arthritis','Siya Essentials','Siya Ayurveda']]});}
       return list(type,filters,fields,options);
     };
     const result=await service.orders(user);
@@ -491,8 +491,8 @@ test('shipment refresh checks ownership, updates events and isolates carrier fai
   const identity=await service.records.read(user.id,'identity','self');
   const patient=await erp.create('Patient',{});
   await erp.update('Mobile App User',identity.data.erpUser,{profiles:[{patient_id:patient.name}]});
-  const invoice=await erp.create('Sales Invoice',{patient:patient.name,customer:'customer',docstatus:1,items:[]});
-  const other=await erp.create('Sales Invoice',{patient:'other',docstatus:1,items:[]});
+  const invoice=await erp.create('Sales Invoice',{sr_si_patient_department:'Siya Ayurveda',patient:patient.name,customer:'customer',docstatus:1,items:[]});
+  const other=await erp.create('Sales Invoice',{sr_si_patient_department:'Siya Ayurveda',patient:'other',docstatus:1,items:[]});
   erp.docs.set('DocType/Shipment Tracking Shipment',{name:'Shipment Tracking Shipment'});
   const shipment=await erp.create('Shipment Tracking Shipment',{sales_invoice:invoice.name,patient:patient.name,customer:'customer',
     shipkia_order_id:'ORDER',shipkia_awb_number:'AWB',shipkia_status:'Dispatched',raw_latest_response:'PRIVATE',events:[]});
@@ -526,8 +526,8 @@ test('shipment permission denial preserves owned orders and reports refresh unav
     const identity=await service.records.read(user.id,'identity','self');
     const patient=await erp.create('Patient',{});
     await erp.update('Mobile App User',identity.data.erpUser,{profiles:[{patient_id:patient.name}]});
-    const invoice=await erp.create('Sales Invoice',{patient:patient.name,docstatus:1,grand_total:1499,items:[],si_shipkia_awb_number:'SAVED-AWB'});
-    const other=await erp.create('Sales Invoice',{patient:'other',docstatus:1,items:[]});
+    const invoice=await erp.create('Sales Invoice',{sr_si_patient_department:'Siya Ayurveda',patient:patient.name,docstatus:1,grand_total:1499,items:[],si_shipkia_awb_number:'SAVED-AWB'});
+    const other=await erp.create('Sales Invoice',{sr_si_patient_department:'Siya Ayurveda',patient:'other',docstatus:1,items:[]});
     erp.docs.set('DocType/Shipment Tracking Shipment',{name:'Shipment Tracking Shipment'});
     await erp.create('Shipment Tracking Shipment',{sales_invoice:invoice.name,patient:patient.name});
     const original=erp[deniedOperation].bind(erp);
@@ -559,7 +559,7 @@ test('an invoice without a shipment never triggers a carrier request',async()=>{
   const identity=await service.records.read(user.id,'identity','self');
   const patient=await erp.create('Patient',{});
   await erp.update('Mobile App User',identity.data.erpUser,{profiles:[{patient_id:patient.name}]});
-  const invoice=await erp.create('Sales Invoice',{patient:patient.name,docstatus:1,items:[]});
+  const invoice=await erp.create('Sales Invoice',{sr_si_patient_department:'Siya Ayurveda',patient:patient.name,docstatus:1,items:[]});
   erp.method=async()=>{throw Error('Must not call a tracking integration');};
   assert.deepEqual(await service.refreshInvoiceTracking(user,invoice.name),{tracking:null,refreshState:'not_available'});
 });

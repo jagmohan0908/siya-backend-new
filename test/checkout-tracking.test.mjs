@@ -98,8 +98,8 @@ test('Seedfit grants and references cannot cross into Siya even with the same cu
 test('purchase grants allow invoice details but never create a patient association',async()=>{
   const {service,tracking,erp}=setup();
   await tracking.receive(...delivery(await begin(tracking)));
-  await erp.create('Sales Invoice',{name:'INV-1',docstatus:1,shopify_order_id:'20834',patient:'PAT-B',posting_date:'2026-10-26',items:[]});
-  await erp.create('Sales Invoice',{name:'INV-2',docstatus:1,shopify_order_id:'999',patient:'PAT-B',posting_date:'2026-10-26',items:[]});
+  await erp.create('Sales Invoice',{sr_si_patient_department:'Siya Ayurveda',name:'INV-1',docstatus:1,shopify_order_id:'20834',patient:'PAT-B',posting_date:'2026-10-26',items:[]});
+  await erp.create('Sales Invoice',{sr_si_patient_department:'Siya Ayurveda',name:'INV-2',docstatus:1,shopify_order_id:'999',patient:'PAT-B',posting_date:'2026-10-26',items:[]});
   assert.equal((await service.ownedInvoice(user,'INV-1')).patient,null);
   await assert.rejects(service.ownedInvoice(user,'INV-2'),{status:404});
   await assert.rejects(service.patient(user),{code:'patient_link_required'});
@@ -117,7 +117,7 @@ test('tracked and patient invoices merge without duplicate entries across pages'
   for(let i=0;i<25;i++) {
     const id=String(20834+i);
     await tracking.receive(...delivery(await begin(tracking),{id:Number(id)}));
-    await erp.create('Sales Invoice',{name:`INV-${id}`,shopify_order_id:id,patient:i%2?'PAT-A':'PAT-B',
+    await erp.create('Sales Invoice',{sr_si_patient_department:'Siya Ayurveda',name:`INV-${id}`,shopify_order_id:id,patient:i%2?'PAT-A':'PAT-B',
       docstatus:1,posting_date:'2026-10-26',items:[]});
   }
   const first=await service.orders(user),second=await service.orders(user,first.nextCursor);
